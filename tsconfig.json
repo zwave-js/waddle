@@ -1,0 +1,22 @@
+// Shared tsconfig to be inherited by all other tsconfigs in this repo
+{
+	"extends": "@tsconfig/node20/tsconfig.json",
+	"compilerOptions": {
+		"rootDir": "src",
+		"outDir": "build/esm",
+
+		"declaration": true,
+		"declarationMap": true,
+
+		"noEmitOnError": true,
+		"removeComments": false,
+		"sourceMap": true,
+		"inlineSourceMap": false,
+		"stripInternal": true,
+
+		"types": ["node"],
+
+		"pretty": true,
+	},
+	"include": ["src/**/*.ts"]
+}

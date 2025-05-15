@@ -1,0 +1,5 @@
+// Shared tsconfig to be inherited by all other tsconfigs in this repo
+{
+	"extends": "./tsconfig.json",
+	"exclude": ["**/*.test.ts"],
+}
