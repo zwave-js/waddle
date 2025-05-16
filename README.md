@@ -417,3 +417,9 @@ or customize the default error by passing a custom error factory to the `TaskSch
 ```js
 const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
+
+## Changelog
+
+### 1.0.0 (2025-05-16)
+
+- Initial release
