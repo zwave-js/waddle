@@ -481,8 +481,7 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
 ## Changelog
-
-### **WORK IN PROGRESS**
+### 1.2.0 (2025-06-24)
 
 - Add utility method `waitFor` for type-safe yielding of Promises
 
