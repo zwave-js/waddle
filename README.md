@@ -482,6 +482,10 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 
 ## Changelog
 
+### **WORK IN PROGRESS**
+
+- Add utility method `waitFor` for type-safe yielding of Promises
+
 ### 1.1.0 (2025-06-24)
 
 - Add support for task concurrency groups, preventing interleaving related tasks
