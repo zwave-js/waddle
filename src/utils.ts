@@ -19,7 +19,8 @@ export type FnOrStatic<TArgs extends any[], TReturn> =
 	| ((...args: TArgs) => TReturn)
 	| TReturn;
 
-export type ReturnTypeOrStatic<T> = T extends (...args: any[]) => infer R ? R
+export type ReturnTypeOrStatic<T> = T extends (...args: any[]) => infer R
+	? R
 	: T;
 
 export function evalOrStatic<T>(

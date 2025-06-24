@@ -26,6 +26,8 @@ export interface Task<
 	readonly tag?: TaskTag;
 	/** The task's priority */
 	readonly priority: TaskPriority;
+	/** The concurrency group this task belongs to */
+	readonly group?: TaskConcurrencyGroup;
 	/** How the task should behave when interrupted */
 	readonly interrupt: TaskInterruptBehavior;
 	/** Starts the task it if hasn't been started yet, and executes the next step of the task */
@@ -63,6 +65,8 @@ export interface TaskBuilder<
 	priority: TaskPriority;
 	/** How the task should behave when interrupted */
 	interrupt?: TaskInterruptBehavior;
+	/** The concurrency group this task belongs to */
+	group?: TaskConcurrencyGroup;
 	/**
 	 * The task's main generator function. This is called repeatedly until it's done.
 	 * The function must yield at points where it may be interrupted.
@@ -155,8 +159,36 @@ export type TaskStepResult<
 			task: Task<unknown, TaskTag>;
 	  };
 
+/** Identifies a concurrency group. Tasks within the same group cannot run concurrently. */
+export interface TaskConcurrencyGroup {
+	id: string;
+}
+
 function compareTasks<T1, T2>(a: Task<T1>, b: Task<T2>): CompareResult {
-	// Sort by priority first. Higher priority goes to the end of the list
+	// In the same concurrency group, only one task may be active at a time.
+	const aConcurrencyGroup = a.group?.id;
+	const bConcurrencyGroup = b.group?.id;
+	if (
+		aConcurrencyGroup &&
+		bConcurrencyGroup &&
+		aConcurrencyGroup === bConcurrencyGroup
+	) {
+		const aActiveOrWaiting =
+			a.state === TaskState.Active ||
+			a.state === TaskState.AwaitingPromise ||
+			a.state === TaskState.AwaitingTask;
+		const bActiveOrWaiting =
+			b.state === TaskState.Active ||
+			b.state === TaskState.AwaitingPromise ||
+			b.state === TaskState.AwaitingTask;
+
+		if (aActiveOrWaiting && !bActiveOrWaiting) return 1; // A is already active
+		if (!aActiveOrWaiting && bActiveOrWaiting) return -1; // B is already active
+
+		// None of the tasks is active, fall back to default sorting
+	}
+
+	// Sort by priority for tasks not in the same concurrency group
 	if (a.priority < b.priority) return 1;
 	if (a.priority > b.priority) return -1;
 
@@ -313,6 +345,7 @@ export class TaskScheduler<
 			name: builder.name,
 			tag: builder.tag,
 			priority: builder.priority,
+			group: builder.group,
 			interrupt: builder.interrupt ?? TaskInterruptBehavior.Resume,
 			promise,
 			async step() {

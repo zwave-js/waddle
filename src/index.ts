@@ -1,10 +1,11 @@
 export {
-	Task,
-	TaskBuilder,
+	type Task,
+	type TaskBuilder,
 	TaskInterruptBehavior,
 	TaskPriority,
-	TaskReturnType,
+	type TaskReturnType,
 	TaskScheduler,
 	TaskState,
-	TaskStepResult,
+	type TaskStepResult,
+	type TaskConcurrencyGroup,
 } from "./Task.js";

@@ -3,6 +3,7 @@ import { createDeferredPromise } from "alcalzone-shared/deferred-promise";
 import { test } from "vitest";
 import {
 	type TaskBuilder,
+	type TaskConcurrencyGroup,
 	TaskInterruptBehavior,
 	TaskPriority,
 	type TaskReturnType,
@@ -1414,4 +1415,220 @@ test("Split tasks can be canceled", async (t) => {
 	await scheduler.removeTasks(() => true);
 
 	t.expect(order).toStrictEqual(["1a", "1b"]);
+});
+
+test("Tasks in the same concurrency group prioritize active/waiting tasks over pending tasks", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "test-group" };
+
+	const yieldedPromise = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		group,
+		task: async function* () {
+			order.push("1a");
+			yield () => yieldedPromise;
+			order.push("1b");
+		},
+	});
+
+	// Wait a bit to ensure the first task starts and becomes waiting
+	await wait(10);
+
+	// Now add another task with the same priority and concurrency group
+	const task2 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		group,
+		task: async function* () {
+			order.push("2a");
+			yield;
+			order.push("2b");
+		},
+	});
+
+	// Resolve the waiting task
+	yieldedPromise.resolve();
+
+	// Wait for both tasks to complete
+	await Promise.all([task1, task2]);
+
+	// The tasks are in the same concurrency group, so task 1 should complete first before task 2 can start
+	t.expect(order).toStrictEqual(["1a", "1b", "2a", "2b"]);
+
+	await scheduler.stop();
+});
+
+test("Tasks in different concurrency groups do not block each other while waiting", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group1: TaskConcurrencyGroup = { id: "group-1" };
+	const group2: TaskConcurrencyGroup = { id: "group-2" };
+
+	const yieldedPromise = createDeferredPromise<void>();
+	const waitingTask = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		group: group1,
+		task: async function* () {
+			order.push("1a");
+			yield () => yieldedPromise;
+			order.push("1b");
+		},
+	});
+
+	// Wait a bit to ensure the first task starts and becomes waiting
+	await wait(10);
+
+	// Add another task with the same priority but a different concurrency group
+	const pendingTask = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		group: group2,
+		task: async function* () {
+			order.push("2a");
+			yield;
+			order.push("2b");
+		},
+	});
+
+	// Resolve the waiting task
+	yieldedPromise.resolve();
+
+	await Promise.all([waitingTask, pendingTask]);
+
+	// The tasks are in different concurrency groups, so they are expected to be interleaved
+	t.expect(order).toStrictEqual(["1a", "2a", "2b", "1b"]);
+
+	await scheduler.stop();
+});
+
+test("Tasks without concurrency groups do not block each other while waiting", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+
+	// Create a task that will become waiting (no group)
+	const yieldedPromise = createDeferredPromise<void>();
+	const waitingTask = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("1a");
+			yield () => yieldedPromise;
+			order.push("1b");
+		},
+	});
+
+	// Wait a bit to ensure the first task starts and becomes waiting
+	await wait(10);
+
+	// Add another task (also no group)
+	const pendingTask = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("2a");
+			yield;
+			order.push("2b");
+		},
+	});
+
+	// Resolve the waiting task
+	yieldedPromise.resolve();
+
+	await Promise.all([waitingTask, pendingTask]);
+
+	// Task 2 does not wait for any promise, so it should finish before task 1 resumes
+	t.expect(order).toStrictEqual(["1a", "2a", "2b", "1b"]);
+
+	await scheduler.stop();
+});
+
+test("Concurrency groups take precedence over priority", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "test-group" };
+
+	// Create a low priority task that will become waiting
+	const yieldedPromise = createDeferredPromise<void>();
+	const waitingTask = scheduler.queueTask({
+		priority: TaskPriority.Low,
+		group,
+		task: async function* () {
+			order.push("1a");
+			yield () => yieldedPromise;
+			order.push("1b");
+		},
+	});
+
+	// Wait a bit to ensure the first task starts and becomes waiting
+	await wait(10);
+
+	// Add a higher priority pending task in the same group
+	const highPriorityTask = scheduler.queueTask({
+		priority: TaskPriority.High,
+		group,
+		task: async function* () {
+			order.push("2a");
+			yield;
+			order.push("2b");
+		},
+	});
+
+	// Resolve the waiting task
+	yieldedPromise.resolve();
+
+	await Promise.all([waitingTask, highPriorityTask]);
+
+	// Because the concurrency group is the same, the higher priority task has to wait, even though
+	// it has a higher priority than the waiting task
+	t.expect(order).toStrictEqual(["1a", "1b", "2a", "2b"]);
+
+	await scheduler.stop();
+});
+
+test("Yielding without waiting works normally, even when concurrency groups are involved", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "test-group" };
+
+	// Create a task that will yield and continue (active state)
+	const activeTask = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		group,
+		task: async function* () {
+			order.push("1a");
+			yield; // This keeps it active, not waiting
+			order.push("1b");
+			yield;
+			order.push("1c");
+		},
+	});
+
+	// Wait a bit to let the active task start
+	await wait(10);
+
+	// Add a pending task in the same group
+	const pendingTask = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		group,
+		task: async function* () {
+			order.push("2a");
+			yield;
+			order.push("2b");
+		},
+	});
+
+	await Promise.all([activeTask, pendingTask]);
+
+	// The active task should complete before the pending task
+	t.expect(order).toStrictEqual(["1a", "1b", "1c", "2a", "2b"]);
+
+	await scheduler.stop();
 });
