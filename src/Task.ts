@@ -78,9 +78,9 @@ export interface TaskBuilder<
 	 * Yielded Promises should not spawn new tasks. If they do, the spawned tasks MUST have a higher priority than the parent task.
 	 */
 	task: () => AsyncGenerator<
-		| (() => Promise<TInner> | TaskBuilder<TReturn, TaskTag, TInner>)
-		| (() => TaskBuilder<TReturn, TaskTag, TInner>)
-		| TaskBuilder<TReturn, TaskTag, TInner>
+		| (() => Promise<unknown> | TaskBuilder<unknown, TaskTag, unknown>)
+		| (() => TaskBuilder<unknown, TaskTag, unknown>)
+		| TaskBuilder<unknown, TaskTag, unknown>
 		| undefined,
 		TReturn,
 		TInner

@@ -9,4 +9,4 @@ export {
 	type TaskStepResult,
 	type TaskConcurrencyGroup,
 } from "./Task.js";
-export { waitFor } from "./utils.js";
+export { waitFor, type WaitForReturnType } from "./utils.js";

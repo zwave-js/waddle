@@ -1,3 +1,5 @@
+import { type TaskBuilder } from "./Task.js";
+
 /** Returns a timestamp with nano-second precision */
 export function highResTimestamp(): number {
 	if (typeof process !== "undefined") {
@@ -31,9 +33,12 @@ export function evalOrStatic<T>(
 	return typeof fnOrConst === "function" ? fnOrConst(...args) : fnOrConst;
 }
 
-export async function* waitFor<T>(
-	promise: Promise<T>,
-): AsyncGenerator<() => Promise<T>, T> {
-	const result = yield () => promise;
+export type WaitForReturnType<T> =
+	T extends Promise<infer U> ? U : T extends TaskBuilder<infer U> ? U : never;
+
+export async function* waitFor<
+	T extends Promise<unknown> | TaskBuilder<unknown>,
+>(thing: T): AsyncGenerator<() => T, WaitForReturnType<T>> {
+	const result = yield () => thing;
 	return result;
 }
