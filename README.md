@@ -449,8 +449,7 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
 ## Changelog
-
-### **WORK IN PROGRESS**
+### 1.1.0 (2025-06-24)
 
 - Add support for task concurrency groups, preventing interleaving related tasks
 

@@ -4,7 +4,7 @@
     "access": "public"
   },
   "description": "A cooperative task scheduler based on generator functions",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "license": "MIT",
   "type": "module",
   "module": "build/index.js",
