@@ -1637,11 +1637,18 @@ test("The type-safe wrapper works correctly", async (t) => {
 	const scheduler = new TaskScheduler();
 	scheduler.start();
 
+	const inner = {
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			return 42;
+		},
+	};
+
 	const task = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		task: async function* () {
 			const foo: string = yield* waitFor(Promise.resolve("bar"));
-			const baz: number = yield* waitFor(Promise.resolve(42));
+			const baz = yield* waitFor(inner);
 			return [foo, baz] as const;
 		},
 	});
