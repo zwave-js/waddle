@@ -481,6 +481,12 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
 ## Changelog
+
+### **WORK IN PROGRESS**
+
+- Fixed some type issues for composite task definitions
+- The `waitFor` utility function is now compatible with TaskBuilder objects too
+
 ### 1.2.0 (2025-06-24)
 
 - Add utility method `waitFor` for type-safe yielding of Promises
