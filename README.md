@@ -309,6 +309,36 @@ const task = scheduler.queueTask({
 
 This task will yield to the scheduler at each `yield` point in the `task1` and `task2` functions, just as if they were all in the same function.
 
+#### Task Concurrency Groups
+
+By default, tasks are interleaved with other tasks when they wait for a Promise or task to be fulfilled. In some situations it may be desirable for a task to finish before another related task is allowed to run. Concurrency groups can be used to achieve this. They take precedence over task priorities, so tasks in the same concurrency group will not be interleaved with each other, even if a pending task has a higher priority. High-priority tasks outside the concurrency group will still interrupt lower-priority tasks in the group.
+
+To use concurrency groups, specify the `group` property in the task builder:
+
+```ts
+const task1 = scheduler.queueTask({
+  priority: TaskPriority.Normal,
+  group: {
+    id: "my-concurrency-group",
+  },
+	task: async function* () {
+    // ...
+	},
+});
+
+const task2 = scheduler.queueTask({
+  priority: TaskPriority.Normal,
+  group: {
+    id: "my-concurrency-group",
+  },
+	task: async function* () {
+    // ...
+	},
+});
+```
+
+In this example, `task1` will finish before `task2` is allowed to run, even if `task1` needs to wait for something external.
+
 #### Error handling
 
 If a task throws an error, the scheduler will catch it and reject the `Promise` returned by `queueTask`. The error can be handled like any other Promise:
