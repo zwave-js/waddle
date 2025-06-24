@@ -211,7 +211,39 @@ async function* fetchResourcesTask() {
 }
 ```
 
-When using TypeScript, you may need to assert the return type due to limits in type inference in generator functions:
+When using TypeScript, you will likely hit limits in type inference in generator functions:
+
+```ts
+async function* fetchResourcesTask() {
+	// async function doLongRunningWork1(): Promise<string> { ... }
+	const result1 = yield () => doLongRunningWork1(); // unknown ⚠️
+	// async function doLongRunningWork2(): Promise<number> { ... }
+	const result2 = yield () => doLongRunningWork2(); // unknown ⚠️
+	// async function doLongRunningWork3(): Promise<boolean> { ... }
+	const result3 = yield () => doLongRunningWork3(); // unknown ⚠️
+
+	// ...
+}
+```
+
+To help mitigate this, we recommend using the `waitFor` utility function together with `yield*` instead. Note that this expects a Promise, not a function!
+
+```ts
+import { waitFor } from "@zwave-js/waddle";
+
+async function* fetchResourcesTask() {
+	// async function doLongRunningWork1(): Promise<string> { ... }
+	const result1 = yield* waitFor(doLongRunningWork1()); // string ✅
+	// async function doLongRunningWork2(): Promise<number> { ... }
+	const result2 = yield* waitFor(doLongRunningWork2()); // number ✅
+	// async function doLongRunningWork3(): Promise<boolean> { ... }
+	const result3 = yield* waitFor(doLongRunningWork3()); // boolean ✅
+
+	// ...
+}
+```
+
+Alternatively, you can assert the return type manually, but this is not type-safe:
 
 ```ts
 async function* fetchResourcesTask() {
@@ -317,22 +349,22 @@ To use concurrency groups, specify the `group` property in the task builder:
 
 ```ts
 const task1 = scheduler.queueTask({
-  priority: TaskPriority.Normal,
-  group: {
-    id: "my-concurrency-group",
-  },
+	priority: TaskPriority.Normal,
+	group: {
+		id: "my-concurrency-group",
+	},
 	task: async function* () {
-    // ...
+		// ...
 	},
 });
 
 const task2 = scheduler.queueTask({
-  priority: TaskPriority.Normal,
-  group: {
-    id: "my-concurrency-group",
-  },
+	priority: TaskPriority.Normal,
+	group: {
+		id: "my-concurrency-group",
+	},
 	task: async function* () {
-    // ...
+		// ...
 	},
 });
 ```
@@ -449,6 +481,7 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
 ## Changelog
+
 ### 1.1.0 (2025-06-24)
 
 - Add support for task concurrency groups, preventing interleaving related tasks

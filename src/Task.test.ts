@@ -9,7 +9,7 @@ import {
 	type TaskReturnType,
 	TaskScheduler,
 } from "./Task.js";
-import { noop } from "./utils.js";
+import { noop, waitFor } from "./utils.js";
 
 test("The scheduler can be started and stopped", async (t) => {
 	const scheduler = new TaskScheduler();
@@ -1629,6 +1629,25 @@ test("Yielding without waiting works normally, even when concurrency groups are 
 
 	// The active task should complete before the pending task
 	t.expect(order).toStrictEqual(["1a", "1b", "1c", "2a", "2b"]);
+
+	await scheduler.stop();
+});
+
+test("The type-safe wrapper works correctly", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const task = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			const foo: string = yield* waitFor(Promise.resolve("bar"));
+			const baz: number = yield* waitFor(Promise.resolve(42));
+			return [foo, baz] as const;
+		},
+	});
+
+	const result = await task;
+	t.expect(result).toStrictEqual(["bar", 42]);
 
 	await scheduler.stop();
 });
