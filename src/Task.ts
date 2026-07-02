@@ -151,6 +151,10 @@ export type TaskStepResult<
 			newState: TaskState.Active;
 	  }
 	| {
+			// The task was reset while the step was in flight. The result is stale and must be dropped.
+			newState: TaskState.None;
+	  }
+	| {
 			newState: TaskState.AwaitingPromise;
 			promise: Promise<unknown>;
 	  }
@@ -247,71 +251,62 @@ export class TaskScheduler<
 		predicate: (task: Task<unknown, TaskTag>) => boolean,
 		reason?: TError,
 	): Promise<boolean> {
-		// Collect tasks that should be removed, but in reverse order,
-		// so that we handle the current task last.
+		// Collect tasks that should be removed, so that we handle the current task last
 		const tasksToRemove: Task<unknown, TaskTag>[] = [];
-		let removeCurrentTask = false;
+		let currentTaskToRemove: Task<unknown, TaskTag> | undefined;
 		for (const task of this._tasks) {
 			if (predicate(task)) {
 				if (task === this._currentTask) {
-					removeCurrentTask = true;
+					currentTaskToRemove = task;
 				} else {
 					tasksToRemove.push(task);
 				}
 			}
 		}
+		if (currentTaskToRemove) {
+			tasksToRemove.push(currentTaskToRemove);
+		}
 
 		reason ??= this.defaultErrorFactory();
 
 		for (const task of tasksToRemove) {
-			if (this.verbose) {
-				console.log(`Removing task: ${getTaskName(task)}`);
+			// Skip tasks the run loop finalized during a previous iteration's await
+			if (this._currentTask !== task && !this._tasks.contains(task)) {
+				continue;
 			}
-			this._tasks.remove(task);
-			if (
-				task.state === TaskState.Active ||
-				task.state === TaskState.AwaitingPromise ||
-				task.state === TaskState.AwaitingTask
-			) {
-				// The task is running, clean it up
-				await task.reset().catch(noop);
-			}
-			task.reject(reason);
-			// Re-add the parent task to the list if there is one
-			if (task.parent) {
-				if (this.verbose) {
-					console.log(
-						`Restoring parent task: ${getTaskName(task.parent)}`,
-					);
-				}
-				this._tasks.add(task.parent);
-			}
-		}
-
-		if (removeCurrentTask && this._currentTask) {
-			if (this.verbose) {
-				console.log(`Removing task: ${getTaskName(this._currentTask)}`);
-			}
-			this._tasks.remove(this._currentTask);
-			await this._currentTask.reset().catch(noop);
-			this._currentTask.reject(reason);
-			// Re-add the parent task to the list if there is one
-			if (this._currentTask.parent) {
-				if (this.verbose) {
-					console.log(
-						`Restoring parent task: ${getTaskName(
-							this._currentTask.parent,
-						)}`,
-					);
-				}
-				this._tasks.add(this._currentTask.parent);
-			}
-			this._currentTask = undefined;
+			await this.dropTask(task, reason);
 		}
 
 		if (this._continueSignal) this._continueSignal.resolve();
 
-		return tasksToRemove.length > 0 || removeCurrentTask;
+		return tasksToRemove.length > 0;
+	}
+
+	/** Removes a single task from the queue, resets it and rejects its promise */
+	private async dropTask(
+		task: Task<unknown, TaskTag>,
+		reason: TError,
+	): Promise<void> {
+		if (this.verbose) {
+			console.log(`Removing task: ${getTaskName(task)}`);
+		}
+		this._tasks.remove(task);
+		// Claim the task before awaiting anything, so the run loop drops the
+		// result of an in-flight step instead of finalizing the task a second time
+		if (this._currentTask === task) {
+			this._currentTask = undefined;
+		}
+		await task.reset().catch(noop);
+		task.reject(reason);
+		// Re-add the parent task to the list if there is one
+		if (task.parent) {
+			if (this.verbose) {
+				console.log(
+					`Restoring parent task: ${getTaskName(task.parent)}`,
+				);
+			}
+			this._tasks.add(task.parent);
+		}
 	}
 
 	public findTask<T = unknown>(
@@ -364,9 +359,23 @@ export class TaskScheduler<
 				generator ??= builder.task();
 				state = TaskState.Active;
 
-				const { value, done } = waitError
-					? await generator.throw(waitError)
-					: await generator.next(prevResult);
+				// Capture the generator so a concurrent reset() can be detected after the await
+				const gen = generator;
+				let genResult: Awaited<ReturnType<typeof gen.next>>;
+				try {
+					genResult = waitError
+						? await gen.throw(waitError)
+						: await gen.next(prevResult);
+				} catch (e) {
+					// Drop errors from a step whose task was reset in the meantime
+					if (generator !== gen) return { newState: TaskState.None };
+					throw e;
+				}
+				// Drop the step result if the task was reset while the generator was running,
+				// so the task state is not corrupted after the reset
+				if (generator !== gen) return { newState: TaskState.None };
+
+				const { value, done } = genResult;
 				prevResult = undefined;
 				waitError = undefined;
 				if (done) {
@@ -435,6 +444,8 @@ export class TaskScheduler<
 				state = TaskState.None;
 				waitForPromise = undefined;
 				generator = undefined;
+				prevResult = undefined;
+				waitError = undefined;
 
 				await builder.cleanup?.();
 			},
@@ -483,36 +494,42 @@ export class TaskScheduler<
 						TaskInterruptBehavior.Restart
 					) {
 						// The current task needs to be restarted after being interrupted, so reset it
-						await this._currentTask.reset();
+						const interrupted = this._currentTask;
+						await interrupted.reset();
+						// Re-evaluate the queue if it changed during the reset
+						if (
+							this._currentTask !== interrupted ||
+							this._tasks.peekStart() !== firstTask
+						) {
+							continue;
+						}
 					}
 					// switch to the new task
 					this._currentTask = firstTask;
 				}
 
+				// Capture the current task, so concurrent removals can be detected after each await
+				const task = this._currentTask;
+
 				if (this.verbose) {
-					console.log(
-						`Stepping through task: ${getTaskName(
-							this._currentTask,
-						)}`,
-					);
+					console.log(`Stepping through task: ${getTaskName(task)}`);
 				}
 
-				const cleanupCurrentTask = async () => {
-					if (this._currentTask) {
-						this._tasks.remove(this._currentTask);
-						await this._currentTask.reset();
-						// Re-add the parent task to the list if there is one
-						if (this._currentTask.parent) {
-							if (this.verbose) {
-								console.log(
-									`Restoring parent task: ${getTaskName(
-										this._currentTask.parent,
-									)}`,
-								);
-							}
-							this._tasks.add(this._currentTask.parent);
+				const finalizeCurrentTask = async () => {
+					this._tasks.remove(task);
+					// Claim the task before awaiting, so a concurrent removeTasks() skips it
+					this._currentTask = undefined;
+					await task.reset();
+					// Re-add the parent task to the list if there is one
+					if (task.parent) {
+						if (this.verbose) {
+							console.log(
+								`Restoring parent task: ${getTaskName(
+									task.parent,
+								)}`,
+							);
 						}
-						this._currentTask = undefined;
+						this._tasks.add(task.parent);
 					}
 				};
 
@@ -520,25 +537,31 @@ export class TaskScheduler<
 				waitFor = undefined;
 				let stepResult: TaskStepResult<unknown, TaskTag>;
 				try {
-					stepResult = await this._currentTask.step();
+					stepResult = await task.step();
 				} catch (e) {
+					// Drop the error if the task was removed during the step. It was already rejected.
+					if (this._currentTask !== task) continue;
+
 					if (this.verbose) {
 						console.error(`- Task threw an error:`, e);
 					}
 					// The task threw an error, expose the result and clean up.
-					this._currentTask.reject(e as Error);
-					await cleanupCurrentTask();
+					task.reject(e as Error);
+					await finalizeCurrentTask();
 					// Then continue with the next iteration
 					continue;
 				}
+
+				// Drop the step result if the task was removed during the step. It was already rejected.
+				if (this._currentTask !== task) continue;
 
 				if (stepResult.newState === TaskState.Done) {
 					if (this.verbose) {
 						console.log(`- Task finished`);
 					}
 					// The task is done, clean up
-					this._currentTask.resolve(stepResult.result);
-					await cleanupCurrentTask();
+					task.resolve(stepResult.result);
+					await finalizeCurrentTask();
 					// Then continue with the next iteration
 					continue;
 				} else if (stepResult.newState === TaskState.AwaitingPromise) {
@@ -548,15 +571,12 @@ export class TaskScheduler<
 					}
 
 					// If the task may be interrupted, check if there are other same-priority tasks that should be executed instead
-					if (
-						this._currentTask.interrupt !==
-						TaskInterruptBehavior.Forbidden
-					) {
+					if (task.interrupt !== TaskInterruptBehavior.Forbidden) {
 						// Re-queue the task, so the queue gets reordered
-						this._tasks.remove(this._currentTask);
-						this._tasks.add(this._currentTask);
+						this._tasks.remove(task);
+						this._tasks.add(task);
 
-						if (this._tasks.peekStart() !== this._currentTask) {
+						if (this._tasks.peekStart() !== task) {
 							if (this.verbose) {
 								console.log(`-- Continuing with another task`);
 							}
@@ -573,11 +593,12 @@ export class TaskScheduler<
 						console.log(`- Task spawned a sub-task`);
 					}
 					this._tasks.add(stepResult.task);
-					this._tasks.remove(this._currentTask);
+					this._tasks.remove(task);
 					// Continue with the next iteration
 					continue;
 				} else {
-					// The current task is not done, continue with the next iteration
+					// The current task is not done, or the step result is stale after a removal.
+					// Continue with the next iteration.
 					continue;
 				}
 			}

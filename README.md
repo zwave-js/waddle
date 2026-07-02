@@ -481,6 +481,11 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
 ## Changelog
+
+### **WORK IN PROGRESS**
+
+- Fixed a crash of the task scheduler that could occur when removing the currently executed task while it is performing an asynchronous operation
+
 ### 1.2.1 (2025-06-24)
 
 - Fixed some type issues for composite task definitions
