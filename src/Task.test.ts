@@ -1658,3 +1658,108 @@ test("The type-safe wrapper works correctly", async (t) => {
 
 	await scheduler.stop();
 });
+
+test("The current task can remove itself synchronously mid-step", async (t) => {
+	const scheduler = new TaskScheduler();
+	const order: string[] = [];
+	scheduler.start();
+
+	let removeResult: Promise<boolean> | undefined;
+
+	const task1 = scheduler.queueTask({
+		name: "task1",
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("1a");
+			await wait(1);
+			// Simulates an event handler that removes the current task
+			// while its step is still in flight
+			removeResult = scheduler.removeTasks((t) => t.name === "task1");
+			order.push("1b");
+		},
+		cleanup: async () => {
+			order.push("1c");
+			await wait(1);
+		},
+	});
+
+	await t.expect(() => task1).rejects.toThrowError("Task was removed");
+	t.expect(await removeResult!).toBe(true);
+
+	// The cleanup runs during the removeTasks call, before the generator resumes
+	t.expect(order).toStrictEqual(["1a", "1c", "1b"]);
+
+	// The scheduler must still be able to execute new tasks
+	const task2 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			return 2;
+		},
+	});
+	t.expect(await task2).toBe(2);
+
+	await scheduler.stop();
+});
+
+test("The current task can be removed while it is waiting for a promise", async (t) => {
+	const scheduler = new TaskScheduler();
+	const order: string[] = [];
+	scheduler.start();
+
+	const t1WasStarted = createDeferredPromise<void>();
+	const t1CleanupStarted = createDeferredPromise<void>();
+	const t1CleanupGate = createDeferredPromise<void>();
+	const yieldedPromise = createDeferredPromise<void>();
+
+	const task1 = scheduler.queueTask({
+		name: "task1",
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("1a");
+			t1WasStarted.resolve();
+			yield () => yieldedPromise;
+			order.push("1b");
+		},
+		cleanup: async () => {
+			order.push("1c");
+			t1CleanupStarted.resolve();
+			await t1CleanupGate;
+		},
+	});
+
+	await t1WasStarted;
+
+	// Remove the waiting task. Its cleanup is gated, so the removal
+	// is still in progress while the scheduler continues running.
+	const removeResult = scheduler.removeTasks((t) => t.name === "task1");
+	await t1CleanupStarted;
+
+	// Queue another task while the removal is in progress
+	const t2WasStarted = createDeferredPromise<void>();
+	const t2Gate = createDeferredPromise<void>();
+	const task2 = scheduler.queueTask({
+		name: "task2",
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("2a");
+			t2WasStarted.resolve();
+			await t2Gate;
+			return "ok";
+		},
+	});
+
+	await t2WasStarted;
+
+	// Finish the removal while task 2's step is in flight
+	t1CleanupGate.resolve();
+	t.expect(await removeResult).toBe(true);
+	await t.expect(() => task1).rejects.toThrowError("Task was removed");
+
+	// Task 2 must not be affected by the removal of task 1
+	t2Gate.resolve();
+	t.expect(await task2).toBe("ok");
+
+	t.expect(order).toStrictEqual(["1a", "1c", "2a"]);
+
+	await scheduler.stop();
+});
