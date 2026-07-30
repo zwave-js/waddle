@@ -467,7 +467,7 @@ export class TaskScheduler<
 	public start(): void {
 		this._stopSignal = createDeferredPromise();
 		// A timer instead of setImmediate, which only exists on Node.js and its clones
-		globalThis.setTimeout(async () => {
+		setTimeout(async () => {
 			try {
 				await this.run();
 			} catch (e) {
