@@ -481,6 +481,11 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
 ## Changelog
+
+### **WORK IN PROGRESS**
+
+- The scheduler now starts its run loop with a timer instead of `setImmediate`, so it no longer requires a Node.js-compatible runtime or polyfills
+
 ### 1.2.2 (2026-07-02)
 
 - Fixed a crash of the task scheduler that could occur when removing the currently executed task while it is performing an asynchronous operation

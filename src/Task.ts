@@ -466,13 +466,14 @@ export class TaskScheduler<
 
 	public start(): void {
 		this._stopSignal = createDeferredPromise();
-		setImmediate(async () => {
+		// A timer instead of setImmediate, which only exists on Node.js and its clones
+		setTimeout(async () => {
 			try {
 				await this.run();
 			} catch (e) {
 				console.error("Task runner crashed", e);
 			}
-		});
+		}, 0);
 	}
 
 	private async run(): Promise<void> {
