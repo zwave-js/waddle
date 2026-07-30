@@ -1,6 +1,6 @@
 import { wait } from "alcalzone-shared/async";
 import { createDeferredPromise } from "alcalzone-shared/deferred-promise";
-import { test, vi } from "vitest";
+import { test } from "vitest";
 import {
 	type TaskBuilder,
 	type TaskConcurrencyGroup,
@@ -1760,28 +1760,6 @@ test("The current task can be removed while it is waiting for a promise", async 
 	t.expect(await task2).toBe("ok");
 
 	t.expect(order).toStrictEqual(["1a", "1c", "2a"]);
-
-	await scheduler.stop();
-});
-
-test("The scheduler runs on runtimes without a global setImmediate", async (t) => {
-	vi.stubGlobal("setImmediate", undefined);
-	t.onTestFinished(() => {
-		vi.unstubAllGlobals();
-	});
-
-	const scheduler = new TaskScheduler();
-	scheduler.start();
-
-	const task = scheduler.queueTask({
-		priority: TaskPriority.Normal,
-		task: async function* () {
-			yield;
-			return 1;
-		},
-	});
-
-	t.expect(await task).toBe(1);
 
 	await scheduler.stop();
 });

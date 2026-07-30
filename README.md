@@ -484,7 +484,7 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 
 ### **WORK IN PROGRESS**
 
-- The scheduler now starts its run loop with a timer instead of `setImmediate`, so it no longer requires a Node.js-compatible runtime
+- The scheduler now starts its run loop with a timer instead of `setImmediate`, so it no longer requires a Node.js-compatible runtime or polyfills
 
 ### 1.2.2 (2026-07-02)
 
