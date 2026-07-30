@@ -214,15 +214,53 @@ function compareTasks<T1, T2>(a: Task<T1>, b: Task<T2>): CompareResult {
 	return Math.sign(b.id - a.id) as CompareResult;
 }
 
+/** Schedules a callback to run in a later task, after the current one and its microtasks are done */
+export type ScheduleImmediate = (callback: () => void) => void;
+
+export interface TaskSchedulerOptions<TError extends Error = Error> {
+	/** Creates the error that removed tasks are rejected with, unless a reason is given */
+	defaultErrorFactory?: () => TError;
+	/** Whether the scheduler logs what it is doing to the console */
+	verbose?: boolean;
+	/**
+	 * Used to schedule the run loop outside of the current task. Defaults to the global
+	 * `setImmediate`, falling back to `setTimeout(..., 0)` on runtimes without it.
+	 */
+	setImmediate?: ScheduleImmediate;
+}
+
 export class TaskScheduler<
 	TaskTag extends { id: string } = { id: string },
 	TError extends Error = Error,
 > {
+	private defaultErrorFactory: () => TError;
+	private verbose: boolean;
+	private setImmediate: ScheduleImmediate;
+
+	public constructor(options?: TaskSchedulerOptions<TError>);
+	public constructor(defaultErrorFactory?: () => TError, verbose?: boolean);
 	public constructor(
-		private defaultErrorFactory: () => TError = () =>
-			new Error("Task was removed") as any,
-		private verbose: boolean = false,
-	) {}
+		optionsOrErrorFactory?: TaskSchedulerOptions<TError> | (() => TError),
+		verbose?: boolean,
+	) {
+		const options: TaskSchedulerOptions<TError> =
+			typeof optionsOrErrorFactory === "function"
+				? { defaultErrorFactory: optionsOrErrorFactory, verbose }
+				: (optionsOrErrorFactory ?? {});
+
+		this.defaultErrorFactory =
+			options.defaultErrorFactory ??
+			(() => new Error("Task was removed") as any);
+		this.verbose = options.verbose ?? false;
+		// Runtimes other than Node.js may have no setImmediate, where a timeout is the
+		// closest portable equivalent and gets clamped to a few milliseconds at worst
+		this.setImmediate =
+			options.setImmediate ??
+			globalThis.setImmediate ??
+			((callback) => {
+				globalThis.setTimeout(callback, 0);
+			});
+	}
 
 	private _tasks = new SortedList<Task<unknown, TaskTag>>(
 		undefined,
@@ -466,7 +504,7 @@ export class TaskScheduler<
 
 	public start(): void {
 		this._stopSignal = createDeferredPromise();
-		setImmediate(async () => {
+		this.setImmediate(async () => {
 			try {
 				await this.run();
 			} catch (e) {

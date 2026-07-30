@@ -480,7 +480,34 @@ or customize the default error by passing a custom error factory to the `TaskSch
 const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
+### Scheduler options
+
+The constructor also accepts an options object:
+
+```js
+const scheduler = new TaskScheduler({
+	defaultErrorFactory: () => new Error("We are all doomed!"),
+	verbose: false,
+	setImmediate: (callback) => setImmediate(callback),
+});
+```
+
+| Option                | Default                               | Purpose                                                 |
+| --------------------- | ------------------------------------- | ------------------------------------------------------- |
+| `defaultErrorFactory` | `() => new Error("Task was removed")` | Creates the error that canceled tasks are rejected with |
+| `verbose`             | `false`                               | Logs what the scheduler is doing to the console         |
+| `setImmediate`        | global `setImmediate`, else a timer   | Schedules the run loop outside of the current task      |
+
+`setImmediate` exists to support runtimes that have no such global, and those that provide a better
+primitive than a `setTimeout(..., 0)` fallback. The callback must not be invoked synchronously.
+
 ## Changelog
+
+### **WORK IN PROGRESS**
+
+- The `TaskScheduler` constructor now accepts an options object, including a `setImmediate` implementation to use for starting the run loop
+- The scheduler no longer requires a global `setImmediate` and falls back to `setTimeout` on runtimes without it
+
 ### 1.2.2 (2026-07-02)
 
 - Fixed a crash of the task scheduler that could occur when removing the currently executed task while it is performing an asynchronous operation

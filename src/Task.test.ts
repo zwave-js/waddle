@@ -1,6 +1,6 @@
 import { wait } from "alcalzone-shared/async";
 import { createDeferredPromise } from "alcalzone-shared/deferred-promise";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import {
 	type TaskBuilder,
 	type TaskConcurrencyGroup,
@@ -1760,6 +1760,70 @@ test("The current task can be removed while it is waiting for a promise", async 
 	t.expect(await task2).toBe("ok");
 
 	t.expect(order).toStrictEqual(["1a", "1c", "2a"]);
+
+	await scheduler.stop();
+});
+
+test("The scheduler uses the given setImmediate implementation to start the run loop", async (t) => {
+	const scheduled: (() => void)[] = [];
+	const scheduler = new TaskScheduler({
+		setImmediate: (callback) => scheduled.push(callback),
+	});
+	scheduler.start();
+
+	const task = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			return 1;
+		},
+	});
+
+	t.expect(scheduled).toHaveLength(1);
+
+	// The run loop only starts once the scheduled callback is invoked
+	scheduled[0]();
+	t.expect(await task).toBe(1);
+
+	await scheduler.stop();
+});
+
+test("The scheduler runs on runtimes without a global setImmediate", async (t) => {
+	vi.stubGlobal("setImmediate", undefined);
+	t.onTestFinished(() => {
+		vi.unstubAllGlobals();
+	});
+
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const task = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			yield;
+			return 1;
+		},
+	});
+
+	t.expect(await task).toBe(1);
+
+	await scheduler.stop();
+});
+
+test("The default error factory can be passed as an option", async (t) => {
+	const scheduler = new TaskScheduler({
+		defaultErrorFactory: () => new Error("We are all doomed!"),
+	});
+	scheduler.start();
+
+	const task = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			yield () => createDeferredPromise<void>();
+		},
+	});
+
+	await scheduler.removeTasks(() => true);
+	await t.expect(() => task).rejects.toThrowError("We are all doomed!");
 
 	await scheduler.stop();
 });
