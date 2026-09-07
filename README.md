@@ -480,7 +480,15 @@ or customize the default error by passing a custom error factory to the `TaskSch
 const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
+## Contributing
+
+AI assistance is welcome when you review, understand, and can explain the
+result. Autonomous-agent contributions and unreviewed AI-generated
+communications are prohibited. Read the full [AI policy](AI_POLICY.md) before
+contributing.
+
 ## Changelog
+
 ### 1.2.3 (2026-07-30)
 
 - The scheduler now starts its run loop with a timer instead of `setImmediate`, so it no longer requires a Node.js-compatible runtime or polyfills
