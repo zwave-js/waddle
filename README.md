@@ -494,8 +494,7 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
 ## Changelog
-
-### **WORK IN PROGRESS**
+### 1.3.0 (2026-09-29)
 
 - The task function now receives a handle to its own task as the first argument. It can be used to identify the task in `removeTasks` predicates.
 
