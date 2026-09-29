@@ -125,6 +125,17 @@ const task = scheduler.findTask((task) => task.tag?.id === "rebuild-routes");
 //    ^ Either a Promise or undefined, depending on whether the task exists or not
 ```
 
+The task function receives its own task as the `thisTask` argument. The task can use it to identify itself when removing tasks (see below):
+
+```js
+scheduler.queueTask({
+	priority: TaskPriority.Normal,
+	task: async function* (thisTask) {
+		yield () => scheduler.removeTasks((task) => task !== thisTask);
+	},
+});
+```
+
 #### Task Priority
 
 There are several task priorities defined:
@@ -457,20 +468,7 @@ if (canceled) {
 }
 ```
 
-A task can cancel all other tasks while keeping itself. The task function receives a handle to its own task as the first argument. It is the same object the predicate is called with, so it can be compared by identity:
-
-```js
-scheduler.queueTask({
-	priority: TaskPriority.Normal,
-	task: async function* (thisTask) {
-		// ...
-		yield () => scheduler.removeTasks((task) => task !== thisTask);
-		// ...
-	},
-});
-```
-
-A tag comparison cannot tell a running task apart from a queued task with the same tag. The handle can. It stays the same when a task with `TaskInterruptBehavior.Restart` is restarted.
+When removing tasks, the `thisTask` argument can be used to avoid removing the currently running task.
 
 Canceled tasks will result in an `Error`. Take care of this when awaiting them!
 
