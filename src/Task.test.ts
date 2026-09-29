@@ -4,6 +4,7 @@ import { test } from "vitest";
 import {
 	type TaskBuilder,
 	type TaskConcurrencyGroup,
+	type TaskHandle,
 	TaskInterruptBehavior,
 	TaskPriority,
 	type TaskReturnType,
@@ -1760,6 +1761,108 @@ test("The current task can be removed while it is waiting for a promise", async 
 	t.expect(await task2).toBe("ok");
 
 	t.expect(order).toStrictEqual(["1a", "1c", "2a"]);
+
+	await scheduler.stop();
+});
+
+test("A task can remove all other tasks by comparing them to its own handle", async (t) => {
+	const scheduler = new TaskScheduler();
+	const order: string[] = [];
+	scheduler.start();
+
+	const t1WasStarted = createDeferredPromise<void>();
+	const removeGate = createDeferredPromise<void>();
+
+	const task1 = scheduler.queueTask({
+		tag: { id: "restart" },
+		priority: TaskPriority.Normal,
+		task: async function* (thisTask) {
+			order.push("1a");
+			t1WasStarted.resolve();
+			yield () =>
+				removeGate.then(() =>
+					scheduler.removeTasks((t) => t !== thisTask),
+				);
+			order.push("1b");
+			return "ok";
+		},
+	});
+
+	await t1WasStarted;
+
+	// A second task with the same tag must be removed, even though the predicate cannot tell them apart by tag
+	const task2 = scheduler.queueTask({
+		tag: { id: "restart" },
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("2a");
+		},
+	});
+
+	removeGate.resolve();
+
+	t.expect(await task1).toBe("ok");
+	await t.expect(() => task2).rejects.toThrowError("Task was removed");
+	t.expect(order).toStrictEqual(["1a", "1b"]);
+
+	await scheduler.stop();
+});
+
+test("A restarted task receives the same handle again", async (t) => {
+	const scheduler = new TaskScheduler();
+	const handles: TaskHandle[] = [];
+	scheduler.start();
+
+	const t1WasStarted = createDeferredPromise<void>();
+
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* (thisTask) {
+			handles.push(thisTask);
+			t1WasStarted.resolve();
+			await wait(1);
+			yield;
+		},
+	});
+
+	await t1WasStarted;
+	const task2 = scheduler.queueTask({
+		priority: TaskPriority.High,
+		task: async function* () {},
+	});
+
+	await Promise.all([task1, task2]);
+
+	t.expect(handles).toHaveLength(2);
+	t.expect(handles[0]).toBe(handles[1]);
+
+	await scheduler.stop();
+});
+
+test("A subtask's handle references the parent task's handle", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	let parentHandle: TaskHandle | undefined;
+	let childHandle: TaskHandle | undefined;
+
+	await scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* (thisTask) {
+			parentHandle = thisTask;
+			yield {
+				priority: TaskPriority.Normal,
+				task: async function* (thisTask) {
+					childHandle = thisTask;
+				},
+			};
+		},
+	});
+
+	t.expect(childHandle).toBeDefined();
+	t.expect(childHandle).not.toBe(parentHandle);
+	t.expect(childHandle!.parent).toBe(parentHandle);
 
 	await scheduler.stop();
 });

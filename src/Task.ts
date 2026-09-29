@@ -7,18 +7,13 @@ import { SortedList } from "alcalzone-shared/sorted-list";
 import { createWrappingCounter } from "./wrappingCounter.js";
 import { evalOrStatic, highResTimestamp, noop } from "./utils.js";
 
-/** A high-level task that can be started and stepped through */
-export interface Task<
-	TReturn,
-	TaskTag extends { id: string } = { id: string },
-	TError extends Error = Error,
-> {
+/** The read-only view of a task that gets passed to its own task function */
+export interface TaskHandle<TaskTag extends { id: string } = { id: string }> {
 	readonly id: number;
 	readonly timestamp: number;
-	readonly builder: TaskBuilder<TReturn, TaskTag>;
 
 	/** The parent task spawning this subtask, if any */
-	readonly parent?: Task<unknown, TaskTag, TError>;
+	readonly parent?: TaskHandle<TaskTag>;
 
 	/** A name to identify the task */
 	readonly name?: string;
@@ -30,6 +25,21 @@ export interface Task<
 	readonly group?: TaskConcurrencyGroup;
 	/** How the task should behave when interrupted */
 	readonly interrupt: TaskInterruptBehavior;
+	/** The current state of the task */
+	get state(): TaskState;
+}
+
+/** A high-level task that can be started and stepped through */
+export interface Task<
+	TReturn,
+	TaskTag extends { id: string } = { id: string },
+	TError extends Error = Error,
+> extends TaskHandle<TaskTag> {
+	readonly builder: TaskBuilder<TReturn, TaskTag>;
+
+	/** The parent task spawning this subtask, if any */
+	readonly parent?: Task<unknown, TaskTag, TError>;
+
 	/** Starts the task it if hasn't been started yet, and executes the next step of the task */
 	step(): Promise<TaskStepResult<TReturn, TaskTag>>;
 	/** Stops the task without further executing it, cleans up, and prepares it for starting again */
@@ -38,8 +48,6 @@ export interface Task<
 	resolve(result: TReturn): void;
 	/** Rejects the task's promise to notify the caller */
 	reject(error: TError): void;
-	/** The current state of the task */
-	get state(): TaskState;
 
 	readonly generator: ReturnType<TaskBuilder<TReturn>["task"]> | undefined;
 	readonly promise: Promise<TReturn>;
@@ -76,8 +84,13 @@ export interface TaskBuilder<
 	 * - Or another task, in which case it must yield a TaskBuilder object or a function that returns one
 	 *
 	 * Yielded Promises should not spawn new tasks. If they do, the spawned tasks MUST have a higher priority than the parent task.
+	 *
+	 * @param thisTask The task that runs this function. It is the same object the scheduler passes to `removeTasks` predicates,
+	 * so it can be compared by identity. It stays the same when the task gets restarted.
 	 */
-	task: () => AsyncGenerator<
+	task: (
+		thisTask: TaskHandle,
+	) => AsyncGenerator<
 		| (() => Promise<unknown> | TaskBuilder<unknown, TaskTag, unknown>)
 		| (() => TaskBuilder<unknown, TaskTag, unknown>)
 		| TaskBuilder<unknown, TaskTag, unknown>
@@ -332,7 +345,7 @@ export class TaskScheduler<
 
 		const self = this;
 
-		return {
+		const task: Task<T, TaskTag, TError> = {
 			id: this._idGenerator(),
 			timestamp: highResTimestamp(),
 			builder,
@@ -356,7 +369,7 @@ export class TaskScheduler<
 					);
 				}
 
-				generator ??= builder.task();
+				generator ??= builder.task(task);
 				state = TaskState.Active;
 
 				// Capture the generator so a concurrent reset() can be detected after the await
@@ -462,6 +475,7 @@ export class TaskScheduler<
 				return generator;
 			},
 		};
+		return task;
 	}
 
 	public start(): void {

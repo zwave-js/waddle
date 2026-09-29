@@ -1,6 +1,7 @@
 export {
 	type Task,
 	type TaskBuilder,
+	type TaskHandle,
 	TaskInterruptBehavior,
 	TaskPriority,
 	type TaskReturnType,

@@ -125,6 +125,17 @@ const task = scheduler.findTask((task) => task.tag?.id === "rebuild-routes");
 //    ^ Either a Promise or undefined, depending on whether the task exists or not
 ```
 
+The task function receives its own task as the `thisTask` argument. The task can use it to identify itself when removing tasks (see below):
+
+```js
+scheduler.queueTask({
+	priority: TaskPriority.Normal,
+	task: async function* (thisTask) {
+		yield () => scheduler.removeTasks((task) => task !== thisTask);
+	},
+});
+```
+
 #### Task Priority
 
 There are several task priorities defined:
@@ -457,6 +468,8 @@ if (canceled) {
 }
 ```
 
+When removing tasks, the `thisTask` argument can be used to avoid removing the currently running task.
+
 Canceled tasks will result in an `Error`. Take care of this when awaiting them!
 
 By default, each canceled tasks will be rejected with this error:
@@ -481,6 +494,11 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
 ## Changelog
+
+### **WORK IN PROGRESS**
+
+- The task function now receives a handle to its own task as the first argument. It can be used to identify the task in `removeTasks` predicates.
+
 ### 1.2.3 (2026-07-30)
 
 - The scheduler now starts its run loop with a timer instead of `setImmediate`, so it no longer requires a Node.js-compatible runtime or polyfills
