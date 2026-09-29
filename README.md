@@ -457,6 +457,21 @@ if (canceled) {
 }
 ```
 
+A task can cancel all other tasks while keeping itself. The task function receives a handle to its own task as the first argument. It is the same object the predicate is called with, so it can be compared by identity:
+
+```js
+scheduler.queueTask({
+	priority: TaskPriority.Normal,
+	task: async function* (thisTask) {
+		// ...
+		yield () => scheduler.removeTasks((task) => task !== thisTask);
+		// ...
+	},
+});
+```
+
+A tag comparison cannot tell a running task apart from a queued task with the same tag. The handle can. It stays the same when a task with `TaskInterruptBehavior.Restart` is restarted.
+
 Canceled tasks will result in an `Error`. Take care of this when awaiting them!
 
 By default, each canceled tasks will be rejected with this error:
@@ -481,6 +496,11 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
 ## Changelog
+
+### **WORK IN PROGRESS**
+
+- The task function now receives a handle to its own task as the first argument. It can be used to identify the task in `removeTasks` predicates.
+
 ### 1.2.3 (2026-07-30)
 
 - The scheduler now starts its run loop with a timer instead of `setImmediate`, so it no longer requires a Node.js-compatible runtime or polyfills
