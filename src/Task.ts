@@ -332,7 +332,7 @@ export class TaskScheduler<
 
 	/**
 	 * Removes `leaf` from the queue, then resets and rejects it and each of its parents up to and including `outermost`.
-	 * The parent of `outermost` is put back into the queue.
+	 * The parent of `outermost` is put back into the queue first.
 	 */
 	private async dropTasks(
 		leaf: Task<unknown, TaskTag>,
@@ -345,6 +345,7 @@ export class TaskScheduler<
 		if (this._currentTask === leaf) {
 			this._currentTask = undefined;
 		}
+		if (outermost.parent) this.restoreParentTask(outermost.parent);
 		for (let task = leaf; ; task = task.parent!) {
 			if (this.verbose) {
 				console.log(`Removing task: ${getTaskName(task)}`);
@@ -353,15 +354,17 @@ export class TaskScheduler<
 			task.reject(reason);
 			if (task === outermost) break;
 		}
-		// Re-add the parent task to the list if there is one
-		if (outermost.parent) {
-			if (this.verbose) {
-				console.log(
-					`Restoring parent task: ${getTaskName(outermost.parent)}`,
-				);
-			}
-			this._tasks.add(outermost.parent);
+	}
+
+	/**
+	 * Puts a parent back into the queue when its subtask is finished or removed.
+	 * Call this before cleaning up the subtask, so the parent can be found during the cleanup.
+	 */
+	private restoreParentTask(parent: Task<unknown, TaskTag>): void {
+		if (this.verbose) {
+			console.log(`Restoring parent task: ${getTaskName(parent)}`);
 		}
+		this._tasks.add(parent);
 	}
 
 	/**
@@ -414,6 +417,14 @@ export class TaskScheduler<
 						promise: waitForPromise,
 					};
 				} else if (state === TaskState.AwaitingTask) {
+					// The scheduler puts a parent back into the queue before its subtask is cleaned up.
+					// The parent must wait until it has received the subtask's result.
+					if (waitForPromise) {
+						return {
+							newState: TaskState.AwaitingPromise,
+							promise: waitForPromise,
+						};
+					}
 					throw new Error(
 						"Cannot step through a task that is waiting for another task",
 					);
@@ -478,14 +489,17 @@ export class TaskScheduler<
 						state = TaskState.AwaitingTask;
 						const subTask = self.createTask(waitFor, this);
 
-						subTask.promise
+						// Ignore the subtask's result if this task was reset in the meantime
+						waitForPromise = subTask.promise
 							.then((result) => {
-								prevResult = result;
+								if (generator === gen) prevResult = result;
 							})
 							.catch((e) => {
-								waitError = e;
+								if (generator === gen) waitError = e;
 							})
 							.finally(() => {
+								if (generator !== gen) return;
+								waitForPromise = undefined;
 								if (state === TaskState.AwaitingTask) {
 									state = TaskState.Active;
 								}
@@ -584,18 +598,8 @@ export class TaskScheduler<
 					this._tasks.remove(task);
 					// Claim the task before awaiting, so a concurrent removeTasks() skips it
 					this._currentTask = undefined;
+					if (task.parent) this.restoreParentTask(task.parent);
 					await task.reset();
-					// Re-add the parent task to the list if there is one
-					if (task.parent) {
-						if (this.verbose) {
-							console.log(
-								`Restoring parent task: ${getTaskName(
-									task.parent,
-								)}`,
-							);
-						}
-						this._tasks.add(task.parent);
-					}
 				};
 
 				// Execute the current task one step further
@@ -659,6 +663,8 @@ export class TaskScheduler<
 					}
 					this._tasks.add(stepResult.task);
 					this._tasks.remove(task);
+					// Switching to the subtask must not count as interrupting the parent
+					this._currentTask = stepResult.task;
 					// Continue with the next iteration
 					continue;
 				} else {
