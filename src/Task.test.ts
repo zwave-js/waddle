@@ -1906,8 +1906,6 @@ test("Removing a parent and its subtask rejects both and does not resume the par
 
 	await childStarted;
 	await wait(1);
-	// The parent is waiting for its child and is not in the queue
-	t.expect(scheduler.findTask((t) => t.name === "parent")).toBeUndefined();
 
 	t.expect(await scheduler.removeTasks(() => true)).toBe(true);
 	await t.expect(() => parent).rejects.toThrowError("Task was removed");
@@ -2051,6 +2049,41 @@ test("Removing a nested parent restores the outer task, which may continue", asy
 		"1c",
 		"1d",
 	]);
+
+	await scheduler.stop();
+});
+
+test("findTask finds a parent task while it waits for a subtask", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const childStarted = createDeferredPromise<void>();
+	const childGate = createDeferredPromise<void>();
+
+	const parent = scheduler.queueTask({
+		name: "parent",
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			yield {
+				name: "child",
+				priority: TaskPriority.Normal,
+				task: async function* () {
+					childStarted.resolve();
+					yield () => childGate;
+				},
+			};
+			return "ok";
+		},
+	});
+
+	await childStarted;
+	await wait(1);
+	t.expect(scheduler.findTask((t) => t.name === "parent")).toBe(parent);
+	t.expect(scheduler.findTask((t) => t.name === "child")).toBeDefined();
+
+	childGate.resolve();
+	t.expect(await parent).toBe("ok");
+	t.expect(scheduler.findTask(() => true)).toBeUndefined();
 
 	await scheduler.stop();
 });

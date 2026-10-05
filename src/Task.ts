@@ -105,6 +105,15 @@ export interface TaskBuilder<
 export type TaskReturnType<T extends TaskBuilder<unknown>> =
 	T extends TaskBuilder<infer R> ? R : never;
 
+/** Yields the given task, then each task waiting for it, up to the outermost one */
+function* selfAndParents<TaskTag extends { id: string }>(
+	task: Task<unknown, TaskTag>,
+): Generator<Task<unknown, TaskTag>> {
+	for (let t: Task<unknown, TaskTag> | undefined = task; t; t = t.parent) {
+		yield t;
+	}
+}
+
 function isTaskBuilder<T>(obj: any): obj is TaskBuilder<T> {
 	return (
 		typeof obj === "object" &&
@@ -274,11 +283,7 @@ export class TaskScheduler<
 		const tasksToRemove = new Set<Task<unknown, TaskTag>>();
 		const currentTasksToRemove: Task<unknown, TaskTag>[] = [];
 		for (const queued of this._tasks) {
-			for (
-				let task: Task<unknown, TaskTag> | undefined = queued;
-				task;
-				task = task.parent
-			) {
+			for (const task of selfAndParents(queued)) {
 				if (!predicate(task)) continue;
 				if (queued === this._currentTask) {
 					currentTasksToRemove.push(task);
@@ -319,11 +324,7 @@ export class TaskScheduler<
 			? [this._currentTask, ...this._tasks]
 			: this._tasks;
 		for (const leaf of leaves) {
-			for (
-				let t: Task<unknown, TaskTag> | undefined = leaf;
-				t;
-				t = t.parent
-			) {
+			for (const t of selfAndParents(leaf)) {
 				if (t === task) return leaf;
 			}
 		}
@@ -363,12 +364,20 @@ export class TaskScheduler<
 		}
 	}
 
+	/**
+	 * Returns the promise of the first task matching the given predicate, if any.
+	 * The predicate also sees parent tasks that are waiting for a subtask.
+	 */
 	public findTask<T = unknown>(
 		predicate: (task: Task<T, TaskTag>) => boolean,
 	): Promise<T> | undefined {
-		return this._tasks.find((t: any) => predicate(t))?.promise as
-			| Promise<T>
-			| undefined;
+		for (const queued of this._tasks) {
+			for (const task of selfAndParents(queued)) {
+				if (predicate(task as Task<T, TaskTag>)) {
+					return task.promise as Promise<T>;
+				}
+			}
+		}
 	}
 
 	/** Creates a task that can be executed */

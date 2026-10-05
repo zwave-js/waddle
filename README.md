@@ -125,6 +125,8 @@ const task = scheduler.findTask((task) => task.tag?.id === "rebuild-routes");
 //    ^ Either a Promise or undefined, depending on whether the task exists or not
 ```
 
+This also finds parent tasks that are waiting for a subtask.
+
 The task function receives its own task as the `thisTask` argument. The task can use it to identify itself when removing tasks (see below):
 
 ```js
@@ -500,6 +502,7 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ### **WORK IN PROGRESS**
 
 - `removeTasks` now also cancels parent tasks that match the predicate while they are waiting for a subtask. Before, these parents were resumed after their subtask was removed.
+- `findTask` now also finds parent tasks that are waiting for a subtask
 
 ### 1.3.0 (2026-09-29)
 
