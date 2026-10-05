@@ -2389,6 +2389,58 @@ test("A restarted parent ignores the result of a subtask removed before the rest
 	await scheduler.stop();
 });
 
+test("A restarted task ignores a rejection of the promise it waited for before the restart", async (t) => {
+	const scheduler = new TaskScheduler();
+	const order: string[] = [];
+	scheduler.start();
+
+	const promise1 = createDeferredPromise<void>();
+	const promise2 = createDeferredPromise<string>();
+	const waiting1 = createDeferredPromise<void>();
+	const waiting2 = createDeferredPromise<void>();
+	let starts = 0;
+
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* () {
+			const run = ++starts;
+			order.push(`1a${run}`);
+			if (run === 1) {
+				waiting1.resolve();
+				yield () => promise1;
+				order.push("1b1");
+			} else {
+				waiting2.resolve();
+				const result = (yield () => promise2) as string;
+				order.push(`1b2 ${result}`);
+			}
+			return "ok";
+		},
+	});
+
+	await waiting1;
+	await wait(1);
+	// Interrupt task 1 while it waits, so it gets reset and restarted
+	await scheduler.queueTask({
+		priority: TaskPriority.High,
+		task: async function* () {
+			order.push("2a");
+		},
+	});
+	await waiting2;
+
+	// Reject the old promise while the restarted task waits for the new one
+	promise1.reject(new Error("stale"));
+	await wait(1);
+	promise2.resolve("done");
+
+	t.expect(await task1).toBe("ok");
+	t.expect(order).toStrictEqual(["1a1", "2a", "1a2", "1b2 done"]);
+
+	await scheduler.stop();
+});
+
 test("A higher-priority task queued while a parent spawns a non-interruptible subtask runs first", async (t) => {
 	const scheduler = new TaskScheduler();
 	const order: string[] = [];

@@ -462,14 +462,16 @@ export class TaskScheduler<
 					const waitFor = evalOrStatic(value);
 					if (waitFor instanceof Promise) {
 						state = TaskState.AwaitingPromise;
+						// Ignore the promise's result if this task was reset in the meantime
 						waitForPromise = waitFor
 							.then((result) => {
-								prevResult = result;
+								if (generator === gen) prevResult = result;
 							})
 							.catch((e) => {
-								waitError = e;
+								if (generator === gen) waitError = e;
 							})
 							.finally(() => {
+								if (generator !== gen) return;
 								waitForPromise = undefined;
 								if (state === TaskState.AwaitingPromise) {
 									state = TaskState.Active;
