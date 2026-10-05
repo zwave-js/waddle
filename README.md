@@ -441,6 +441,8 @@ const parentTask = scheduler.queueTask({
 
 To cancel one or more tasks, simply call the `scheduler.removeTasks` method. This method takes a predicate function that will be called for each active and queued task. If the predicate returns `true`, the task will be removed from the scheduler. This can be used to cancel tasks that are no longer needed.
 
+The predicate is also called for parent tasks that are waiting for a subtask. Canceling such a parent also cancels the subtasks it is waiting for. Canceling only a subtask rejects the promise the parent is waiting for, so the parent can handle the error and continue.
+
 Note that running tasks will not be canceled immediately. Instead they will run until the next `yield` point first.
 
 ```js
@@ -494,6 +496,11 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
 ## Changelog
+
+### **WORK IN PROGRESS**
+
+- `removeTasks` now also cancels parent tasks that match the predicate while they are waiting for a subtask. Before, these parents were resumed after their subtask was removed.
+
 ### 1.3.0 (2026-09-29)
 
 - The task function now receives a handle to its own task as the first argument. It can be used to identify the task in `removeTasks` predicates.

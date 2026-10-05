@@ -259,66 +259,107 @@ export class TaskScheduler<
 		return task.promise;
 	}
 
-	/** Removes/stops tasks matching the given predicate. Returns `true` when a task was removed, `false` otherwise. */
+	/**
+	 * Removes/stops tasks matching the given predicate. Returns `true` when a task was removed, `false` otherwise.
+	 *
+	 * The predicate also sees parent tasks that are waiting for a subtask.
+	 * Removing such a parent also removes the subtasks it is waiting for.
+	 */
 	public async removeTasks(
 		predicate: (task: Task<unknown, TaskTag>) => boolean,
 		reason?: TError,
 	): Promise<boolean> {
-		// Collect tasks that should be removed, so that we handle the current task last
-		const tasksToRemove: Task<unknown, TaskTag>[] = [];
-		let currentTaskToRemove: Task<unknown, TaskTag> | undefined;
-		for (const task of this._tasks) {
-			if (predicate(task)) {
-				if (task === this._currentTask) {
-					currentTaskToRemove = task;
+		// Collect tasks that should be removed, so that we handle the current task last.
+		// Each queued task is the end of a chain of parents waiting for it.
+		const tasksToRemove = new Set<Task<unknown, TaskTag>>();
+		const currentTasksToRemove: Task<unknown, TaskTag>[] = [];
+		for (const queued of this._tasks) {
+			for (
+				let task: Task<unknown, TaskTag> | undefined = queued;
+				task;
+				task = task.parent
+			) {
+				if (!predicate(task)) continue;
+				if (queued === this._currentTask) {
+					currentTasksToRemove.push(task);
 				} else {
-					tasksToRemove.push(task);
+					tasksToRemove.add(task);
 				}
 			}
 		}
-		if (currentTaskToRemove) {
-			tasksToRemove.push(currentTaskToRemove);
+		for (const task of currentTasksToRemove) {
+			tasksToRemove.add(task);
 		}
 
 		reason ??= this.defaultErrorFactory();
 
 		for (const task of tasksToRemove) {
-			// Skip tasks the run loop finalized during a previous iteration's await
-			if (this._currentTask !== task && !this._tasks.contains(task)) {
-				continue;
+			// Skip tasks the run loop finalized or that were dropped with an earlier chain
+			const leaf = this.findLeafTask(task);
+			if (!leaf) continue;
+
+			// Drop everything from the leaf up to the outermost matching parent
+			let outermost = task;
+			for (let t = task.parent; t; t = t.parent) {
+				if (tasksToRemove.has(t)) outermost = t;
 			}
-			await this.dropTask(task, reason);
+			await this.dropTasks(leaf, outermost, reason);
 		}
 
 		if (this._continueSignal) this._continueSignal.resolve();
 
-		return tasksToRemove.length > 0;
+		return tasksToRemove.size > 0;
 	}
 
-	/** Removes a single task from the queue, resets it and rejects its promise */
-	private async dropTask(
+	/** Returns the queued or current task that is `task` itself or one of its subtasks, if any */
+	private findLeafTask(
 		task: Task<unknown, TaskTag>,
+	): Task<unknown, TaskTag> | undefined {
+		const leaves = this._currentTask
+			? [this._currentTask, ...this._tasks]
+			: this._tasks;
+		for (const leaf of leaves) {
+			for (
+				let t: Task<unknown, TaskTag> | undefined = leaf;
+				t;
+				t = t.parent
+			) {
+				if (t === task) return leaf;
+			}
+		}
+	}
+
+	/**
+	 * Removes `leaf` from the queue, then resets and rejects it and each of its parents up to and including `outermost`.
+	 * The parent of `outermost` is put back into the queue.
+	 */
+	private async dropTasks(
+		leaf: Task<unknown, TaskTag>,
+		outermost: Task<unknown, TaskTag>,
 		reason: TError,
 	): Promise<void> {
-		if (this.verbose) {
-			console.log(`Removing task: ${getTaskName(task)}`);
-		}
-		this._tasks.remove(task);
+		this._tasks.remove(leaf);
 		// Claim the task before awaiting anything, so the run loop drops the
 		// result of an in-flight step instead of finalizing the task a second time
-		if (this._currentTask === task) {
+		if (this._currentTask === leaf) {
 			this._currentTask = undefined;
 		}
-		await task.reset().catch(noop);
-		task.reject(reason);
+		for (let task = leaf; ; task = task.parent!) {
+			if (this.verbose) {
+				console.log(`Removing task: ${getTaskName(task)}`);
+			}
+			await task.reset().catch(noop);
+			task.reject(reason);
+			if (task === outermost) break;
+		}
 		// Re-add the parent task to the list if there is one
-		if (task.parent) {
+		if (outermost.parent) {
 			if (this.verbose) {
 				console.log(
-					`Restoring parent task: ${getTaskName(task.parent)}`,
+					`Restoring parent task: ${getTaskName(outermost.parent)}`,
 				);
 			}
-			this._tasks.add(task.parent);
+			this._tasks.add(outermost.parent);
 		}
 	}
 
