@@ -2388,3 +2388,37 @@ test("A restarted parent ignores the result of a subtask removed before the rest
 
 	await scheduler.stop();
 });
+
+test("A higher-priority task queued while a parent spawns a non-interruptible subtask runs first", async (t) => {
+	const scheduler = new TaskScheduler();
+	const order: string[] = [];
+	scheduler.start();
+
+	let high: Promise<void> | undefined;
+	const parent = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("1a");
+			high = scheduler.queueTask({
+				priority: TaskPriority.High,
+				task: async function* () {
+					order.push("3a");
+				},
+			});
+			yield {
+				priority: TaskPriority.Normal,
+				interrupt: TaskInterruptBehavior.Forbidden,
+				task: async function* () {
+					order.push("2a");
+				},
+			};
+			order.push("1b");
+		},
+	});
+
+	await parent;
+	await high;
+	t.expect(order).toStrictEqual(["1a", "3a", "2a", "1b"]);
+
+	await scheduler.stop();
+});

@@ -664,7 +664,7 @@ export class TaskScheduler<
 					this._tasks.add(stepResult.task);
 					this._tasks.remove(task);
 					// Switching to the subtask must not count as interrupting the parent
-					this._currentTask = stepResult.task;
+					this._currentTask = undefined;
 					// Continue with the next iteration
 					continue;
 				} else {
