@@ -2389,6 +2389,119 @@ test("A restarted parent ignores the result of a subtask removed before the rest
 	await scheduler.stop();
 });
 
+for (const outcome of ["fulfilled", "rejected"] as const) {
+	test(`A restarted task ignores the promise it waited for before the restart when it gets ${outcome}`, async (t) => {
+		const scheduler = new TaskScheduler();
+		const order: string[] = [];
+		scheduler.start();
+
+		const promise1 = createDeferredPromise<string>();
+		const promise2 = createDeferredPromise<string>();
+		const waiting1 = createDeferredPromise<void>();
+		const waiting2 = createDeferredPromise<void>();
+		let starts = 0;
+
+		const task1 = scheduler.queueTask({
+			priority: TaskPriority.Normal,
+			interrupt: TaskInterruptBehavior.Restart,
+			task: async function* () {
+				const run = ++starts;
+				order.push(`1a${run}`);
+				if (run === 1) {
+					waiting1.resolve();
+					yield () => promise1;
+					order.push("1b1");
+				} else {
+					waiting2.resolve();
+					const result = (yield () => promise2) as string;
+					order.push(`1b2 ${result}`);
+				}
+				return "ok";
+			},
+		});
+
+		await waiting1;
+		await wait(1);
+		// Interrupt task 1 while it waits, so it gets reset and restarted
+		await scheduler.queueTask({
+			priority: TaskPriority.High,
+			task: async function* () {
+				order.push("2a");
+			},
+		});
+		await waiting2;
+
+		// Settle the old promise while the restarted task waits for the new one
+		if (outcome === "fulfilled") {
+			promise1.resolve("stale");
+		} else {
+			promise1.reject(new Error("stale"));
+		}
+		await wait(1);
+
+		// Wake up the scheduler, so it steps task 1 again before the new promise settles
+		const low = scheduler.queueTask({
+			priority: TaskPriority.Low,
+			task: async function* () {
+				order.push("3a");
+			},
+		});
+		await wait(1);
+		t.expect(order).toStrictEqual(["1a1", "2a", "1a2"]);
+
+		promise2.resolve("done");
+
+		t.expect(await task1).toBe("ok");
+		await low;
+		t.expect(order).toStrictEqual(["1a1", "2a", "1a2", "1b2 done", "3a"]);
+
+		await scheduler.stop();
+	});
+}
+
+test("A restarted task receives the result of its new promise when the old one is fulfilled right after it", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const promise1 = createDeferredPromise<string>();
+	const promise2 = createDeferredPromise<string>();
+	const waiting1 = createDeferredPromise<void>();
+	const waiting2 = createDeferredPromise<void>();
+	let starts = 0;
+
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* () {
+			if (++starts === 1) {
+				waiting1.resolve();
+				yield () => promise1;
+				return "stale run";
+			}
+			waiting2.resolve();
+			return (yield () => promise2) as string;
+		},
+	});
+
+	await waiting1;
+	await wait(1);
+	// Interrupt task 1 while it waits, so it gets reset and restarted
+	await scheduler.queueTask({
+		priority: TaskPriority.High,
+		task: async function* () {},
+	});
+	await waiting2;
+	await wait(1);
+
+	// Fulfill the old promise in the same tick, after the new one
+	promise2.resolve("done");
+	promise1.resolve("stale");
+
+	t.expect(await task1).toBe("done");
+
+	await scheduler.stop();
+});
+
 test("A higher-priority task queued while a parent spawns a non-interruptible subtask runs first", async (t) => {
 	const scheduler = new TaskScheduler();
 	const order: string[] = [];
