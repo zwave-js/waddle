@@ -503,7 +503,6 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 
 - `removeTasks` now also cancels parent tasks that match the predicate while they are waiting for a subtask. Before, these parents were resumed after their subtask was removed.
 - `findTask` now also finds parent tasks that are waiting for a subtask
-- When a subtask finishes or is removed, its parent is now put back into the queue before the subtask's cleanup runs. This way, `findTask` and `removeTasks` see the parent during the cleanup.
 - Fixed: Tasks with the `Restart` interrupt behavior were restarted every time they yielded a subtask, so they never finished
 
 ### 1.3.0 (2026-09-29)
