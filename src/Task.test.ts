@@ -1866,3 +1866,559 @@ test("A subtask's handle references the parent task's handle", async (t) => {
 
 	await scheduler.stop();
 });
+
+test("Removing a parent and its subtask rejects both and does not resume the parent", async (t) => {
+	const scheduler = new TaskScheduler();
+	const order: string[] = [];
+	scheduler.start();
+
+	const childStarted = createDeferredPromise<void>();
+	const childGate = createDeferredPromise<void>();
+
+	const parent = scheduler.queueTask({
+		name: "parent",
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("1a");
+			try {
+				yield {
+					name: "child",
+					priority: TaskPriority.Normal,
+					task: async function* () {
+						order.push("2a");
+						childStarted.resolve();
+						yield () => childGate;
+						order.push("2b");
+					},
+					cleanup: async () => {
+						order.push("2c");
+					},
+				};
+			} catch {
+				order.push("1b");
+			}
+			order.push("1c");
+		},
+		cleanup: async () => {
+			order.push("1d");
+		},
+	});
+
+	await childStarted;
+	await wait(1);
+
+	t.expect(await scheduler.removeTasks(() => true)).toBe(true);
+	await t.expect(() => parent).rejects.toThrowError("Task was removed");
+	t.expect(scheduler.findTask(() => true)).toBeUndefined();
+
+	childGate.resolve();
+	await wait(10);
+	t.expect(order).toStrictEqual(["1a", "2a", "2c", "1d"]);
+
+	await scheduler.stop();
+});
+
+test("Removing a waiting parent also removes the subtask it waits for", async (t) => {
+	const scheduler = new TaskScheduler();
+	const order: string[] = [];
+	scheduler.start();
+
+	const childStarted = createDeferredPromise<void>();
+	const childGate = createDeferredPromise<void>();
+
+	const parent = scheduler.queueTask({
+		name: "parent",
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("1a");
+			yield {
+				name: "child",
+				priority: TaskPriority.Normal,
+				task: async function* () {
+					order.push("2a");
+					childStarted.resolve();
+					yield () => childGate;
+					order.push("2b");
+				},
+				cleanup: async () => {
+					order.push("2c");
+				},
+			};
+			order.push("1b");
+		},
+		cleanup: async () => {
+			order.push("1c");
+		},
+	});
+
+	await childStarted;
+	await wait(1);
+	const child = scheduler.findTask((t) => t.name === "child");
+	t.expect(child).toBeDefined();
+
+	t.expect(await scheduler.removeTasks((t) => t.name === "parent")).toBe(
+		true,
+	);
+	await t.expect(() => parent).rejects.toThrowError("Task was removed");
+	await t.expect(() => child!).rejects.toThrowError("Task was removed");
+	t.expect(scheduler.findTask(() => true)).toBeUndefined();
+
+	childGate.resolve();
+	await wait(10);
+	t.expect(order).toStrictEqual(["1a", "2a", "2c", "1c"]);
+
+	await scheduler.stop();
+});
+
+test("Removing a nested parent restores the outer task, which may continue", async (t) => {
+	const scheduler = new TaskScheduler();
+	const order: string[] = [];
+	scheduler.start();
+
+	const innerStarted = createDeferredPromise<void>();
+	const innerGate = createDeferredPromise<void>();
+	let innerError: unknown;
+
+	const outer = scheduler.queueTask({
+		name: "outer",
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("1a");
+			try {
+				yield {
+					name: "middle",
+					priority: TaskPriority.Normal,
+					task: async function* () {
+						order.push("2a");
+						try {
+							yield {
+								name: "inner",
+								priority: TaskPriority.Normal,
+								task: async function* () {
+									order.push("3a");
+									innerStarted.resolve();
+									yield () => innerGate;
+									order.push("3b");
+								},
+								cleanup: async () => {
+									order.push("3c");
+								},
+							};
+						} catch {
+							order.push("2b");
+						}
+						order.push("2c");
+					},
+					cleanup: async () => {
+						order.push("2d");
+					},
+				};
+			} catch (e) {
+				innerError = e;
+				order.push("1b");
+			}
+			order.push("1c");
+			return "ok";
+		},
+		cleanup: async () => {
+			order.push("1d");
+		},
+	});
+
+	await innerStarted;
+	await wait(1);
+
+	t.expect(
+		await scheduler.removeTasks(
+			(t) => t.name === "middle" || t.name === "inner",
+		),
+	).toBe(true);
+
+	t.expect(await outer).toBe("ok");
+	t.expect((innerError as Error).message).toBe("Task was removed");
+
+	innerGate.resolve();
+	await wait(10);
+	t.expect(order).toStrictEqual([
+		"1a",
+		"2a",
+		"3a",
+		"3c",
+		"2d",
+		"1b",
+		"1c",
+		"1d",
+	]);
+
+	await scheduler.stop();
+});
+
+test("findTask finds a parent task while it waits for a subtask", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const childStarted = createDeferredPromise<void>();
+	const childGate = createDeferredPromise<void>();
+
+	const parent = scheduler.queueTask({
+		name: "parent",
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			yield {
+				name: "child",
+				priority: TaskPriority.Normal,
+				task: async function* () {
+					childStarted.resolve();
+					yield () => childGate;
+				},
+			};
+			return "ok";
+		},
+	});
+
+	await childStarted;
+	await wait(1);
+	t.expect(scheduler.findTask((t) => t.name === "parent")).toBe(parent);
+	t.expect(scheduler.findTask((t) => t.name === "child")).toBeDefined();
+
+	childGate.resolve();
+	t.expect(await parent).toBe("ok");
+	t.expect(scheduler.findTask(() => true)).toBeUndefined();
+
+	await scheduler.stop();
+});
+
+test("A parent can be found from a continuation of its finished subtask's promise", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const childStarted = createDeferredPromise<void>();
+	const childGate = createDeferredPromise<void>();
+
+	const parent = scheduler.queueTask({
+		name: "parent",
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			yield {
+				name: "child",
+				priority: TaskPriority.Normal,
+				task: async function* () {
+					childStarted.resolve();
+					yield () => childGate;
+				},
+			};
+			return "ok";
+		},
+	});
+
+	await childStarted;
+	await wait(1);
+	const child = scheduler.findTask((t) => t.name === "child")!;
+	const parentFound = child.then(
+		() => !!scheduler.findTask((t) => t.name === "parent"),
+	);
+
+	childGate.resolve();
+	t.expect(await parentFound).toBe(true);
+	t.expect(await parent).toBe("ok");
+
+	await scheduler.stop();
+});
+
+test("A parent can be found while its finished subtask cleans up, and resumes afterwards", async (t) => {
+	const scheduler = new TaskScheduler();
+	const order: string[] = [];
+	scheduler.start();
+
+	const cleanupStarted = createDeferredPromise<void>();
+	const cleanupGate = createDeferredPromise<void>();
+
+	const parent = scheduler.queueTask({
+		name: "parent",
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("1a");
+			yield {
+				name: "child",
+				priority: TaskPriority.Normal,
+				task: async function* () {
+					order.push("2a");
+				},
+				cleanup: async () => {
+					order.push("2b");
+					cleanupStarted.resolve();
+					await cleanupGate;
+					order.push("2c");
+				},
+			};
+			order.push("1b");
+			return "ok";
+		},
+	});
+
+	await cleanupStarted;
+	t.expect(scheduler.findTask((t) => t.name === "parent")).toBe(parent);
+
+	cleanupGate.resolve();
+	t.expect(await parent).toBe("ok");
+	t.expect(order).toStrictEqual(["1a", "2a", "2b", "2c", "1b"]);
+
+	await scheduler.stop();
+});
+
+test("A parent can be removed while its finished subtask cleans up", async (t) => {
+	const scheduler = new TaskScheduler();
+	const order: string[] = [];
+	scheduler.start();
+
+	const cleanupStarted = createDeferredPromise<void>();
+	const cleanupGate = createDeferredPromise<void>();
+
+	const parent = scheduler.queueTask({
+		name: "parent",
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("1a");
+			yield {
+				name: "child",
+				priority: TaskPriority.Normal,
+				task: async function* () {
+					order.push("2a");
+				},
+				cleanup: async () => {
+					order.push("2b");
+					cleanupStarted.resolve();
+					await cleanupGate;
+				},
+			};
+			order.push("1b");
+		},
+	});
+
+	await cleanupStarted;
+	t.expect(await scheduler.removeTasks((t) => t.name === "parent")).toBe(
+		true,
+	);
+	await t.expect(() => parent).rejects.toThrowError("Task was removed");
+
+	cleanupGate.resolve();
+	await wait(10);
+	t.expect(order).toStrictEqual(["1a", "2a", "2b"]);
+	t.expect(scheduler.findTask(() => true)).toBeUndefined();
+
+	await scheduler.stop();
+});
+
+test("A parent can be found while its removed subtask cleans up, and handles the error afterwards", async (t) => {
+	const scheduler = new TaskScheduler();
+	const order: string[] = [];
+	scheduler.start();
+
+	const childStarted = createDeferredPromise<void>();
+	const childGate = createDeferredPromise<void>();
+	const cleanupStarted = createDeferredPromise<void>();
+	const cleanupGate = createDeferredPromise<void>();
+
+	const parent = scheduler.queueTask({
+		name: "parent",
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("1a");
+			try {
+				yield {
+					name: "child",
+					priority: TaskPriority.Normal,
+					task: async function* () {
+						order.push("2a");
+						childStarted.resolve();
+						yield () => childGate;
+					},
+					cleanup: async () => {
+						order.push("2b");
+						cleanupStarted.resolve();
+						await cleanupGate;
+						order.push("2c");
+					},
+				};
+			} catch {
+				order.push("1b");
+			}
+			return "recovered";
+		},
+	});
+
+	await childStarted;
+	await wait(1);
+	const removed = scheduler.removeTasks((t) => t.name === "child");
+	await cleanupStarted;
+	t.expect(scheduler.findTask((t) => t.name === "parent")).toBe(parent);
+
+	// Wake up the scheduler, so it picks the parent before the cleanup is done
+	const other = scheduler.queueTask({
+		priority: TaskPriority.Low,
+		task: async function* () {
+			order.push("3a");
+		},
+	});
+	await wait(10);
+	t.expect(order).toStrictEqual(["1a", "2a", "2b"]);
+
+	cleanupGate.resolve();
+	t.expect(await removed).toBe(true);
+	t.expect(await parent).toBe("recovered");
+	await other;
+	t.expect(order).toStrictEqual(["1a", "2a", "2b", "2c", "1b", "3a"]);
+
+	await scheduler.stop();
+});
+
+test("A parent with the Restart interrupt behavior is not restarted when it yields a subtask", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	let starts = 0;
+	const parent = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* () {
+			starts++;
+			if (starts > 1) throw new Error("The parent was restarted");
+			yield {
+				priority: TaskPriority.Normal,
+				task: async function* () {},
+			};
+			return "ok";
+		},
+	});
+
+	t.expect(await parent).toBe("ok");
+	t.expect(starts).toBe(1);
+
+	await scheduler.stop();
+});
+
+test("A restarted parent ignores the result of a subtask removed before the restart", async (t) => {
+	const scheduler = new TaskScheduler();
+	const order: string[] = [];
+	scheduler.start();
+
+	const child1Started = createDeferredPromise<void>();
+	const child2Started = createDeferredPromise<void>();
+	const child2Gate = createDeferredPromise<void>();
+	const cleanupStarted = createDeferredPromise<void>();
+	const cleanupGate = createDeferredPromise<void>();
+	let childRuns = 0;
+	let starts = 0;
+
+	const parent = scheduler.queueTask({
+		name: "parent",
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* () {
+			if (++starts > 2)
+				throw new Error("The parent was restarted too often");
+			order.push("1a");
+			yield {
+				name: "child",
+				priority: TaskPriority.Normal,
+				task: async function* () {
+					const run = ++childRuns;
+					order.push(`2a${run}`);
+					if (run === 1) {
+						child1Started.resolve();
+						yield () => new Promise(() => {});
+					} else {
+						child2Started.resolve();
+						yield () => child2Gate;
+					}
+				},
+				cleanup: async () => {
+					if (childRuns > 1) return;
+					order.push("2b");
+					cleanupStarted.resolve();
+					await cleanupGate;
+				},
+			};
+			order.push("1b");
+			return "ok";
+		},
+	});
+
+	await child1Started;
+	await wait(1);
+	const removed = scheduler.removeTasks((t) => t.name === "child");
+	await cleanupStarted;
+
+	// Wake up the scheduler, so it picks the parent while the removed subtask cleans up
+	const low = scheduler.queueTask({
+		priority: TaskPriority.Low,
+		task: async function* () {
+			order.push("4a");
+		},
+	});
+	await wait(1);
+
+	// Interrupt the parent, so it gets reset and restarted
+	await scheduler.queueTask({
+		priority: TaskPriority.High,
+		task: async function* () {
+			order.push("3a");
+		},
+	});
+	await child2Started;
+
+	// Reject the removed subtask while the restarted parent waits for its new subtask
+	cleanupGate.resolve();
+	t.expect(await removed).toBe(true);
+	await wait(1);
+	child2Gate.resolve();
+
+	t.expect(await parent).toBe("ok");
+	await low;
+	t.expect(order).toStrictEqual([
+		"1a",
+		"2a1",
+		"2b",
+		"3a",
+		"1a",
+		"2a2",
+		"1b",
+		"4a",
+	]);
+
+	await scheduler.stop();
+});
+
+test("A higher-priority task queued while a parent spawns a non-interruptible subtask runs first", async (t) => {
+	const scheduler = new TaskScheduler();
+	const order: string[] = [];
+	scheduler.start();
+
+	let high: Promise<void> | undefined;
+	const parent = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("1a");
+			high = scheduler.queueTask({
+				priority: TaskPriority.High,
+				task: async function* () {
+					order.push("3a");
+				},
+			});
+			yield {
+				priority: TaskPriority.Normal,
+				interrupt: TaskInterruptBehavior.Forbidden,
+				task: async function* () {
+					order.push("2a");
+				},
+			};
+			order.push("1b");
+		},
+	});
+
+	await parent;
+	await high;
+	t.expect(order).toStrictEqual(["1a", "3a", "2a", "1b"]);
+
+	await scheduler.stop();
+});
