@@ -498,8 +498,7 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
 ## Changelog
-
-### **WORK IN PROGRESS**
+### 1.3.1 (2026-10-06)
 
 - Fixed: `removeTasks` and `findTasks` now also consider parent tasks that are waiting for a subtask
 - Fixed: Tasks with the `Restart` interrupt behavior were restarted every time they yielded a subtask, so they never finished
