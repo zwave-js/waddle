@@ -1913,7 +1913,7 @@ test("A started Restart task keeps its priority to itself while it waits", async
 
 	const order: string[] = [];
 
-	// Task 1 may be restarted and waits for a promise
+	// Task 1 must be restarted after an interruption and waits for a promise
 	const gate1 = createDeferredPromise<void>();
 	let starts = 0;
 	const task1 = scheduler.queueTask({
@@ -2015,7 +2015,7 @@ test("A higher-priority task restarts a started Restart task", async (t) => {
 
 	const order: string[] = [];
 
-	// Task 1 may be restarted and waits for a new promise each time it starts
+	// Task 1 must be restarted after an interruption and waits for a new promise each time it starts
 	const gates = [
 		createDeferredPromise<void>(),
 		createDeferredPromise<void>(),
@@ -2094,6 +2094,97 @@ test("A started Restart task lets the holder of a concurrency group run when its
 	gate1.resolve();
 	await Promise.all([task1, task2]);
 	t.expect(order).toStrictEqual(["1a", "2a", "1b", "3a", "2b"]);
+
+	await scheduler.stop();
+});
+
+test("A group member with a lower priority runs in place of a blocked member with a higher priority, while a task with a priority in between waits", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "group" };
+
+	// Task 1 has a low priority, holds the group and waits
+	const gate1 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Low,
+		group,
+		task: async function* () {
+			order.push("1a");
+			yield () => gate1;
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	// Task 2 waits for task 3, which has a high priority and is in the group of task 1
+	const task2 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("2a");
+			yield () =>
+				scheduler.queueTask({
+					priority: TaskPriority.High,
+					group,
+					task: async function* () {
+						order.push("3a");
+					},
+				});
+			order.push("2b");
+		},
+	});
+	await wait(1);
+	t.expect(order).toStrictEqual(["1a", "2a"]);
+
+	// Task 2 waits, but task 1 still runs in place of task 3
+	gate1.resolve();
+	await Promise.all([task1, task2]);
+	t.expect(order).toStrictEqual(["1a", "2a", "1b", "3a", "2b"]);
+
+	await scheduler.stop();
+});
+
+test("A waiting Restart task that holds a group finishes before a member of its group and a task without a group", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "group" };
+
+	// Task 1 must be restarted after an interruption, holds the group and waits
+	const gate1 = createDeferredPromise<void>();
+	let starts = 0;
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		group,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* () {
+			order.push(`1a${++starts}`);
+			yield () => gate1;
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	const createTask = (n: number, group?: TaskConcurrencyGroup) =>
+		scheduler.queueTask({
+			priority: TaskPriority.Normal,
+			group,
+			task: async function* () {
+				order.push(`${n}a`);
+			},
+		});
+	const task2 = createTask(2, group);
+	const task3 = createTask(3);
+
+	// Neither task 2 nor task 3 runs while task 1 waits, so task 1 is not restarted
+	await wait(10);
+	t.expect(order).toStrictEqual(["1a1"]);
+
+	gate1.resolve();
+	await Promise.all([task1, task2, task3]);
+	t.expect(order).toStrictEqual(["1a1", "1b", "2a", "3a"]);
 
 	await scheduler.stop();
 });

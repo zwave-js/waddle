@@ -114,17 +114,6 @@ function* selfAndParents<TaskTag extends { id: string }>(
 	}
 }
 
-/** Returns whether the given task or one of its parents is in the given set */
-function isSelfOrParent<TaskTag extends { id: string }>(
-	task: Task<unknown, TaskTag>,
-	tasks: Set<Task<unknown, TaskTag>>,
-): boolean {
-	for (const t of selfAndParents(task)) {
-		if (tasks.has(t)) return true;
-	}
-	return false;
-}
-
 function isTaskBuilder<T>(obj: any): obj is TaskBuilder<T> {
 	return (
 		typeof obj === "object" &&
@@ -434,42 +423,39 @@ export class TaskScheduler<
 		return true;
 	}
 
-	/**
-	 * Returns the tasks that may run while a `Restart` task holds their priority.
-	 * These are the holders themselves, and the tasks holding a concurrency group that their subtasks wait for, directly or through other subtasks.
-	 */
-	private getPriorityHoldExemptions(): Set<Task<unknown, TaskTag>> {
-		const exempt = new Set(this._priorityHolders.values());
-		let changed = exempt.size > 0;
-		while (changed) {
-			changed = false;
-			for (const task of this._tasks) {
-				if (!this.isBlockedByGroup(task)) continue;
-				if (!isSelfOrParent(task, exempt)) continue;
-				const groupHolder = this._groupHolders.get(task.group!.id)!;
-				if (!exempt.has(groupHolder)) {
-					exempt.add(groupHolder);
-					changed = true;
-				}
-			}
+	/** Returns whether a started `Restart` task that is not one of the given task's parents holds the task's priority */
+	private isBlockedByPriority(task: Task<unknown, TaskTag>): boolean {
+		const holder = this._priorityHolders.get(task.priority);
+		if (!holder) return false;
+		for (const t of selfAndParents(task)) {
+			if (t === holder) return false;
 		}
-		return exempt;
+		return true;
 	}
 
-	/** Returns whether a started `Restart` task outside the given task's parents holds the task's priority */
-	private isBlockedByPriority(
+	/**
+	 * Follows a task to the queued holder of the concurrency group it waits for, and on through further groups.
+	 * Returns the task itself when it does not wait for a group, and `undefined` when the tasks wait for each other's groups.
+	 */
+	private findRunnerFor(
 		task: Task<unknown, TaskTag>,
-		exempt: Set<Task<unknown, TaskTag>>,
-	): boolean {
-		if (!this._priorityHolders.has(task.priority)) return false;
-		return !isSelfOrParent(task, exempt);
+	): Task<unknown, TaskTag> | undefined {
+		const visited = new Set<Task<unknown, TaskTag>>();
+		let runner: Task<unknown, TaskTag> | undefined = task;
+		while (runner && this.isBlockedByGroup(runner)) {
+			if (visited.has(runner)) return;
+			visited.add(runner);
+			runner = this.findLeafTask(
+				this._groupHolders.get(runner.group!.id)!,
+			);
+		}
+		return runner;
 	}
 
 	/** Returns the queued task that may take the next step, other than `skip` */
 	private pickNextTask(
 		skip?: Task<unknown, TaskTag>,
 	): Task<unknown, TaskTag> | undefined {
-		const exempt = this.getPriorityHoldExemptions();
 		let waitingPriority: TaskPriority | undefined;
 		for (const task of this._tasks) {
 			if (task === skip) continue;
@@ -480,16 +466,26 @@ export class TaskScheduler<
 			) {
 				return;
 			}
-			// Skip tasks that wait for another member of their concurrency group
-			if (this.isBlockedByGroup(task)) continue;
-			// Skip tasks that wait for a promise
-			if (this._waitingFor.has(task)) {
-				waitingPriority ??= task.priority;
+			// Skip tasks that wait for a started Restart task with the same priority
+			if (this.isBlockedByPriority(task)) continue;
+			const runner = this.findRunnerFor(task);
+			if (!runner || runner === skip) continue;
+			// A task that waits for another member of its concurrency group lets that member run in its place.
+			// It does so only when the member has a lower priority or a Restart task holds the member's priority.
+			if (
+				runner !== task &&
+				runner.priority <= task.priority &&
+				!this.isBlockedByPriority(runner)
+			) {
 				continue;
 			}
-			// Skip tasks that wait for a started Restart task with the same priority
-			if (this.isBlockedByPriority(task, exempt)) continue;
-			return task;
+			// Skip tasks that wait for a promise
+			if (this._waitingFor.has(runner)) {
+				// Only a task that waits itself holds back tasks with a lower priority
+				if (runner === task) waitingPriority ??= task.priority;
+				continue;
+			}
+			return runner;
 		}
 	}
 
