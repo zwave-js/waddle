@@ -190,49 +190,33 @@ export interface TaskConcurrencyGroup {
 	id: string;
 }
 
-function compareTasks<T1, T2>(a: Task<T1>, b: Task<T2>): CompareResult {
-	// In the same concurrency group, only one task may be active at a time.
-	const aConcurrencyGroup = a.group?.id;
-	const bConcurrencyGroup = b.group?.id;
-	if (
-		aConcurrencyGroup &&
-		bConcurrencyGroup &&
-		aConcurrencyGroup === bConcurrencyGroup
-	) {
-		const aActiveOrWaiting =
-			a.state === TaskState.Active ||
-			a.state === TaskState.AwaitingPromise ||
-			a.state === TaskState.AwaitingTask;
-		const bActiveOrWaiting =
-			b.state === TaskState.Active ||
-			b.state === TaskState.AwaitingPromise ||
-			b.state === TaskState.AwaitingTask;
+function rootTask<TaskTag extends { id: string }>(
+	task: Task<unknown, TaskTag>,
+): Task<unknown, TaskTag> {
+	let root = task;
+	while (root.parent) root = root.parent;
+	return root;
+}
 
-		if (aActiveOrWaiting && !bActiveOrWaiting) return 1; // A is already active
-		if (!aActiveOrWaiting && bActiveOrWaiting) return -1; // B is already active
-
-		// None of the tasks is active, fall back to default sorting
-	}
-
-	// Sort by priority for tasks not in the same concurrency group
+/**
+ * Sorts tasks by priority, then in the order they were queued.
+ * The comparison must only use properties that do not change while a task is queued.
+ * Whether a task may run right now is decided when the next task gets picked.
+ */
+function compareTasks<TaskTag extends { id: string }>(
+	a: Task<unknown, TaskTag>,
+	b: Task<unknown, TaskTag>,
+): CompareResult {
 	if (a.priority < b.priority) return 1;
 	if (a.priority > b.priority) return -1;
 
-	// Deprioritize waiting tasks
-	const aWaiting =
-		a.state === TaskState.AwaitingPromise ||
-		a.state === TaskState.AwaitingTask;
-	const bWaiting =
-		b.state === TaskState.AwaitingPromise ||
-		b.state === TaskState.AwaitingTask;
-	if (!aWaiting && bWaiting) return 1;
-	if (aWaiting && !bWaiting) return -1;
+	// A subtask takes the queue position of its outermost parent
+	const aRoot = rootTask(a);
+	const bRoot = rootTask(b);
+	if (aRoot.timestamp < bRoot.timestamp) return 1;
+	if (aRoot.timestamp > bRoot.timestamp) return -1;
+	if (aRoot !== bRoot) return Math.sign(bRoot.id - aRoot.id) as CompareResult;
 
-	// Sort equal priority by timestamp. Newer tasks go to the end of the list
-	if (a.timestamp < b.timestamp) return 1;
-	if (a.timestamp > b.timestamp) return -1;
-
-	// If all else fails, sort by ID
 	return Math.sign(b.id - a.id) as CompareResult;
 }
 
@@ -251,6 +235,10 @@ export class TaskScheduler<
 		compareTasks,
 	);
 	private _currentTask: Task<unknown, TaskTag> | undefined;
+	/** The promises that queued tasks wait for, until they settle */
+	private _waitingFor = new Map<Task<unknown, TaskTag>, Promise<unknown>>();
+	/** The task in each concurrency group that has started and not finished yet */
+	private _groupHolders = new Map<string, Task<unknown, TaskTag>>();
 
 	private _idGenerator = createWrappingCounter(0xff_ff_ff);
 	private _continueSignal: DeferredPromise<void> | undefined;
@@ -345,6 +333,10 @@ export class TaskScheduler<
 		if (this._currentTask === leaf) {
 			this._currentTask = undefined;
 		}
+		for (let task = leaf; ; task = task.parent!) {
+			this.releaseTask(task);
+			if (task === outermost) break;
+		}
 		if (outermost.parent) this.restoreParentTask(outermost.parent);
 		for (let task = leaf; ; task = task.parent!) {
 			if (this.verbose) {
@@ -365,6 +357,69 @@ export class TaskScheduler<
 			console.log(`Restoring parent task: ${getTaskName(parent)}`);
 		}
 		this._tasks.add(parent);
+	}
+
+	/** Forgets the promise and concurrency group the scheduler tracks for a task */
+	private releaseTask(task: Task<unknown, TaskTag>): void {
+		this._waitingFor.delete(task);
+		const groupId = task.group?.id;
+		if (groupId && this._groupHolders.get(groupId) === task) {
+			this._groupHolders.delete(groupId);
+		}
+	}
+
+	/** Skips the task when picking the next one until the promise settles, then wakes up the run loop */
+	private trackWaitingTask(
+		task: Task<unknown, TaskTag>,
+		promise: Promise<unknown>,
+	): void {
+		if (this._waitingFor.get(task) === promise) return;
+		this._waitingFor.set(task, promise);
+		const settled = () => {
+			// Ignore the promise if the task was reset or removed in the meantime
+			if (this._waitingFor.get(task) !== promise) return;
+			this._waitingFor.delete(task);
+			this._continueSignal?.resolve();
+		};
+		promise.then(settled, settled);
+	}
+
+	/**
+	 * Returns whether another task holds the concurrency group of the given task.
+	 * A group held by one of its parents counts as held by the task itself.
+	 */
+	private isBlockedByGroup(task: Task<unknown, TaskTag>): boolean {
+		const groupId = task.group?.id;
+		if (!groupId) return false;
+		const holder = this._groupHolders.get(groupId);
+		if (!holder) return false;
+		for (const t of selfAndParents(task)) {
+			if (t === holder) return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Returns the first queued task that may take a step now.
+	 * It skips tasks that wait for a promise or for another member of their concurrency group.
+	 * While a task waits for a promise, tasks with a lower priority may not run.
+	 */
+	private pickNextTask(): Task<unknown, TaskTag> | undefined {
+		let waitingPriority: TaskPriority | undefined;
+		for (const task of this._tasks) {
+			if (
+				waitingPriority != undefined &&
+				task.priority > waitingPriority
+			) {
+				return;
+			}
+			if (this.isBlockedByGroup(task)) continue;
+			if (this._waitingFor.has(task)) {
+				waitingPriority ??= task.priority;
+				continue;
+			}
+			return task;
+		}
 	}
 
 	/**
@@ -558,46 +613,48 @@ export class TaskScheduler<
 
 	private async run(): Promise<void> {
 		while (true) {
-			let waitFor: Promise<unknown> | undefined;
-			if (this._tasks.length > 0) {
-				const firstTask = this._tasks.peekStart()!;
-				if (!this._currentTask) {
-					// We're not currently executing a task, start executing the first one
-					this._currentTask = firstTask;
-				} else if (
-					this._currentTask !== firstTask &&
-					this._currentTask.interrupt !==
-						TaskInterruptBehavior.Forbidden
-				) {
-					// We are executing an interruptible task, and a new task with a higher priority was added
+			// A task that may not be interrupted keeps running, even while it waits
+			const nextTask =
+				this._currentTask?.interrupt === TaskInterruptBehavior.Forbidden
+					? this._currentTask
+					: this.pickNextTask();
+			if (nextTask) {
+				if (this._currentTask && this._currentTask !== nextTask) {
+					// We are executing an interruptible task, and another task may run now
 					if (
 						this._currentTask.interrupt ===
 						TaskInterruptBehavior.Restart
 					) {
 						// The current task needs to be restarted after being interrupted, so reset it
 						const interrupted = this._currentTask;
+						this.releaseTask(interrupted);
 						await interrupted.reset();
 						// Re-evaluate the queue if it changed during the reset
 						if (
 							this._currentTask !== interrupted ||
-							this._tasks.peekStart() !== firstTask
+							this.pickNextTask() !== nextTask
 						) {
 							continue;
 						}
 					}
-					// switch to the new task
-					this._currentTask = firstTask;
 				}
+				this._currentTask = nextTask;
 
 				// Capture the current task, so concurrent removals can be detected after each await
-				const task = this._currentTask;
+				const task = nextTask;
 
 				if (this.verbose) {
 					console.log(`Stepping through task: ${getTaskName(task)}`);
 				}
 
+				const groupId = task.group?.id;
+				if (groupId && !this._groupHolders.has(groupId)) {
+					this._groupHolders.set(groupId, task);
+				}
+
 				const finalizeCurrentTask = async () => {
 					this._tasks.remove(task);
+					this.releaseTask(task);
 					// Claim the task before awaiting, so a concurrent removeTasks() skips it
 					this._currentTask = undefined;
 					if (task.parent) this.restoreParentTask(task.parent);
@@ -605,7 +662,6 @@ export class TaskScheduler<
 				};
 
 				// Execute the current task one step further
-				waitFor = undefined;
 				let stepResult: TaskStepResult<unknown, TaskTag>;
 				try {
 					stepResult = await task.step();
@@ -641,23 +697,11 @@ export class TaskScheduler<
 						console.log(`- Task waiting`);
 					}
 
-					// If the task may be interrupted, check if there are other same-priority tasks that should be executed instead
+					this.trackWaitingTask(task, stepResult.promise);
+					// Look for another task that may run in the meantime
 					if (task.interrupt !== TaskInterruptBehavior.Forbidden) {
-						// Re-queue the task, so the queue gets reordered
-						this._tasks.remove(task);
-						this._tasks.add(task);
-
-						if (this._tasks.peekStart() !== task) {
-							if (this.verbose) {
-								console.log(`-- Continuing with another task`);
-							}
-							// The task is no longer the first in the queue. Switch to the other one
-							continue;
-						}
+						continue;
 					}
-
-					// Otherwise, we got nothing to do right now than to wait
-					waitFor = stepResult.promise;
 				} else if (stepResult.newState === TaskState.AwaitingTask) {
 					// The task spawned a sub-task. Replace it with the sub-task and continue executing
 					if (this.verbose) {
@@ -676,16 +720,12 @@ export class TaskScheduler<
 				}
 			}
 
-			// Task queue empty. Wait for either a new task or the stop signal,
-			// or the current task to finish waiting
+			// No task may run right now. Wait for a new task, a settled promise or the stop signal
 			this._continueSignal = createDeferredPromise();
-			const nextAction = await Promise.race(
-				[
-					this._continueSignal.then(() => "continue" as const),
-					this._stopSignal!.then(() => "stop" as const),
-					waitFor?.then(() => "continue" as const),
-				].filter((p) => p !== undefined),
-			);
+			const nextAction = await Promise.race([
+				this._continueSignal.then(() => "continue" as const),
+				this._stopSignal!.then(() => "stop" as const),
+			]);
 			this._continueSignal = undefined;
 			if (nextAction === "stop") break;
 		}
