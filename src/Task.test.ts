@@ -1641,7 +1641,7 @@ test("A group member spawned as a subtask waits for the active member of its gro
 	const order: string[] = [];
 	const group: TaskConcurrencyGroup = { id: "test-group" };
 
-	// Each parent has no group and spawns a grouped subtask that waits between its steps
+	// Each parent has no group and spawns a grouped subtask that waits after each step
 	const queueParent = (id: number) =>
 		scheduler.queueTask({
 			priority: TaskPriority.Normal,
@@ -1650,8 +1650,8 @@ test("A group member spawned as a subtask waits for the active member of its gro
 					priority: TaskPriority.Normal,
 					group,
 					task: async function* () {
-						for (let step = 1; step <= 3; step++) {
-							order.push(`${id}:${step}`);
+						for (const step of ["a", "b", "c"]) {
+							order.push(`${id}${step}`);
 							yield () => wait(5);
 						}
 					},
@@ -1659,9 +1659,9 @@ test("A group member spawned as a subtask waits for the active member of its gro
 			},
 		});
 
+	// The second subtask is spawned while the first one waits, but must not start before the first one is done
 	await Promise.all([queueParent(1), queueParent(2)]);
-
-	t.expect(order).toStrictEqual(["1:1", "1:2", "1:3", "2:1", "2:2", "2:3"]);
+	t.expect(order).toStrictEqual(["1a", "1b", "1c", "2a", "2b", "2c"]);
 
 	await scheduler.stop();
 });
@@ -1673,43 +1673,47 @@ test("A group member waits for the active member of its group while a task of an
 	const order: string[] = [];
 	const group: TaskConcurrencyGroup = { id: "test-group" };
 
-	const otherGate = createDeferredPromise<void>();
-	const other = scheduler.queueTask({
+	// Task 1 has no group and waits at the head of the queue for the whole test
+	const gate1 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		task: async function* () {
-			yield () => otherGate;
+			yield () => gate1;
 		},
 	});
 	await wait(1);
 
-	const memberGate = createDeferredPromise<void>();
-	const member1 = scheduler.queueTask({
-		priority: TaskPriority.Normal,
-		group,
-		task: async function* () {
-			order.push("1a");
-			yield () => memberGate;
-			order.push("1b");
-		},
-	});
-	await wait(1);
-
-	const member2 = scheduler.queueTask({
+	// Task 2 starts and holds the group while it waits
+	const gate2 = createDeferredPromise<void>();
+	const task2 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		group,
 		task: async function* () {
 			order.push("2a");
+			yield () => gate2;
+			order.push("2b");
+		},
+	});
+	await wait(1);
+
+	// Task 3 is in the same group, so it must not start while task 2 waits
+	const task3 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		group,
+		task: async function* () {
+			order.push("3a");
 		},
 	});
 	await wait(10);
-	t.expect(order).toStrictEqual(["1a"]);
+	t.expect(order).toStrictEqual(["2a"]);
 
-	memberGate.resolve();
-	await Promise.all([member1, member2]);
-	t.expect(order).toStrictEqual(["1a", "1b", "2a"]);
+	// Task 3 starts once task 2 is done, while task 1 still waits
+	gate2.resolve();
+	await Promise.all([task2, task3]);
+	t.expect(order).toStrictEqual(["2a", "2b", "3a"]);
 
-	otherGate.resolve();
-	await other;
+	gate1.resolve();
+	await task1;
 
 	await scheduler.stop();
 });
@@ -1721,8 +1725,9 @@ test("A group member that waits for a subtask keeps other members of its group f
 	const order: string[] = [];
 	const group: TaskConcurrencyGroup = { id: "test-group" };
 
-	const subtaskGate = createDeferredPromise<void>();
-	const member1 = scheduler.queueTask({
+	// Task 1 holds the group and waits for a subtask without a group
+	const gate2 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		group,
 		task: async function* () {
@@ -1730,7 +1735,8 @@ test("A group member that waits for a subtask keeps other members of its group f
 			yield {
 				priority: TaskPriority.Normal,
 				task: async function* () {
-					yield () => subtaskGate;
+					order.push("2a");
+					yield () => gate2;
 				},
 			};
 			order.push("1b");
@@ -1738,19 +1744,21 @@ test("A group member that waits for a subtask keeps other members of its group f
 	});
 	await wait(1);
 
-	const member2 = scheduler.queueTask({
+	// Task 3 is in the same group, so it must not start while task 1 waits for its subtask
+	const task3 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		group,
 		task: async function* () {
-			order.push("2a");
+			order.push("3a");
 		},
 	});
 	await wait(10);
-	t.expect(order).toStrictEqual(["1a"]);
+	t.expect(order).toStrictEqual(["1a", "2a"]);
 
-	subtaskGate.resolve();
-	await Promise.all([member1, member2]);
-	t.expect(order).toStrictEqual(["1a", "1b", "2a"]);
+	// Task 3 starts once task 1 is done
+	gate2.resolve();
+	await Promise.all([task1, task3]);
+	t.expect(order).toStrictEqual(["1a", "2a", "1b", "3a"]);
 
 	await scheduler.stop();
 });
@@ -1786,6 +1794,7 @@ test("A task resumes when its promise settles, even while another task waits ahe
 
 	const order: string[] = [];
 
+	// Task 1 waits at the head of the queue
 	const gate1 = createDeferredPromise<void>();
 	const task1 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
@@ -1797,6 +1806,7 @@ test("A task resumes when its promise settles, even while another task waits ahe
 	});
 	await wait(1);
 
+	// Task 2 waits behind task 1
 	const gate2 = createDeferredPromise<void>();
 	const task2 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
@@ -1808,6 +1818,7 @@ test("A task resumes when its promise settles, even while another task waits ahe
 	});
 	await wait(1);
 
+	// Task 2 continues as soon as its promise settles, while task 1 still waits
 	gate2.resolve();
 	await wait(10);
 	t.expect(order).toStrictEqual(["1a", "2a", "2b"]);
@@ -1825,41 +1836,45 @@ test("A subtask keeps the queue position of a parent with the same priority, als
 
 	const order: string[] = [];
 
-	const subtaskGate = createDeferredPromise<void>();
-	const parent = scheduler.queueTask({
+	// Task 1 takes a step, then spawns subtask 2 with the same priority
+	const gate2 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		task: async function* () {
-			order.push("P");
+			order.push("1a");
 			yield;
 			yield {
 				priority: TaskPriority.Normal,
 				task: async function* () {
-					order.push("S1");
-					yield () => subtaskGate;
-					order.push("S2");
+					order.push("2a");
+					yield () => gate2;
+					order.push("2b");
 				},
 			};
 		},
 	});
 
-	const otherGate = createDeferredPromise<void>();
-	const other = scheduler.queueTask({
+	// Task 3 is queued after task 1, but before subtask 2 is spawned
+	const gate3 = createDeferredPromise<void>();
+	const task3 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		task: async function* () {
-			order.push("Q1");
-			yield () => otherGate;
-			order.push("Q2");
+			order.push("3a");
+			yield () => gate3;
+			order.push("3b");
 		},
 	});
 
+	// Subtask 2 runs right after its parent, before task 3 starts
 	await wait(10);
-	t.expect(order).toStrictEqual(["P", "S1", "Q1"]);
+	t.expect(order).toStrictEqual(["1a", "2a", "3a"]);
 
-	// Settle both promises at once, so the queue position decides which task resumes first
-	otherGate.resolve();
-	subtaskGate.resolve();
-	await Promise.all([parent, other]);
-	t.expect(order).toStrictEqual(["P", "S1", "Q1", "S2", "Q2"]);
+	// Settle both promises at once, so the queue position decides which task resumes first.
+	// Subtask 2 has the queue position of task 1, which is ahead of task 3.
+	gate3.resolve();
+	gate2.resolve();
+	await Promise.all([task1, task3]);
+	t.expect(order).toStrictEqual(["1a", "2a", "3a", "2b", "3b"]);
 
 	await scheduler.stop();
 });
@@ -1870,28 +1885,70 @@ test("A subtask with a higher priority than its parent runs after tasks of its p
 
 	const order: string[] = [];
 
-	let high: Promise<void> | undefined;
-	const parent = scheduler.queueTask({
+	// Task 1 queues task 2 with a high priority, then spawns subtask 3 with the same high priority
+	let task2: Promise<void> | undefined;
+	const task1 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		task: async function* () {
-			high = scheduler.queueTask({
+			task2 = scheduler.queueTask({
 				priority: TaskPriority.High,
 				task: async function* () {
-					order.push("H");
+					order.push("2a");
 				},
 			});
 			yield {
 				priority: TaskPriority.High,
 				task: async function* () {
-					order.push("S");
+					order.push("3a");
 				},
 			};
 		},
 	});
 
-	await parent;
-	await high;
-	t.expect(order).toStrictEqual(["H", "S"]);
+	// The queue position of task 1 does not count among the high-priority tasks
+	await task1;
+	await task2;
+	t.expect(order).toStrictEqual(["2a", "3a"]);
+
+	await scheduler.stop();
+});
+
+test("A waiting Restart task is not restarted when a task with the same priority runs in between", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+
+	// Task 1 may be restarted and waits for a promise
+	const gate1 = createDeferredPromise<void>();
+	let starts = 0;
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* () {
+			order.push(`1a${++starts}`);
+			yield () => gate1;
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	// Task 2 has the same priority, so it runs while task 1 waits without interrupting it
+	const task2 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("2a");
+			yield;
+			order.push("2b");
+		},
+	});
+	await task2;
+	t.expect(order).toStrictEqual(["1a1", "2a", "2b"]);
+
+	// Task 1 continues where it left off
+	gate1.resolve();
+	await task1;
+	t.expect(order).toStrictEqual(["1a1", "2a", "2b", "1b"]);
 
 	await scheduler.stop();
 });
