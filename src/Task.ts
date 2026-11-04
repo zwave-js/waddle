@@ -84,6 +84,8 @@ export interface TaskBuilder<
 	 * - Or another task, in which case it must yield a TaskBuilder object or a function that returns one
 	 *
 	 * Yielded Promises should not spawn new tasks. If they do, the spawned tasks MUST have a higher priority than the parent task.
+	 * A `Forbidden` or `Restart` task MUST NOT yield such a Promise. A `Forbidden` task keeps the spawned task from running,
+	 * and a `Restart` task is restarted every time the spawned task runs.
 	 *
 	 * @param thisTask The task that runs this function. It is the same object the scheduler passes to `removeTasks` predicates,
 	 * so it can be compared by identity. It stays the same when the task gets restarted.
@@ -275,6 +277,8 @@ export class TaskScheduler<
 
 	/** Moves a queued task behind the other queued tasks with its priority, so tasks with the same priority take turns */
 	private endTurn(task: Task<unknown, TaskTag>): void {
+		// A group member may have been removed while another task ran in its place
+		if (!this._tasks.contains(task)) return;
 		this._tasks.remove(task);
 		this.assignNextTurn(task);
 		this._tasks.add(task);
@@ -477,10 +481,15 @@ export class TaskScheduler<
 		return taskToRun;
 	}
 
-	/** Returns the queued task that may take the next step, other than `skip` */
+	/**
+	 * Returns the queued task that may take the next step, other than `skip`.
+	 * `candidate` is the task it runs for. This differs from `task` when `task` runs in place of a group member.
+	 */
 	private pickNextTask(
 		skip?: Task<unknown, TaskTag>,
-	): Task<unknown, TaskTag> | undefined {
+	):
+		| { task: Task<unknown, TaskTag>; candidate: Task<unknown, TaskTag> }
+		| undefined {
 		let floorPriority: TaskPriority | undefined;
 		for (const candidate of this._tasks) {
 			if (candidate === skip) continue;
@@ -504,15 +513,13 @@ export class TaskScheduler<
 			) {
 				continue;
 			}
-			// Skip tasks that wait for a promise
+			// Skip tasks that wait for a promise.
+			// A task that waits in place of a group member keeps tasks with a lower priority than that member from running.
 			if (this._awaitedPromises.has(taskToRun)) {
-				// Only a candidate that waits itself holds back tasks with a lower priority
-				if (taskToRun === candidate) {
-					floorPriority ??= candidate.priority;
-				}
+				floorPriority ??= candidate.priority;
 				continue;
 			}
-			return taskToRun;
+			return { task: taskToRun, candidate };
 		}
 	}
 
@@ -707,14 +714,17 @@ export class TaskScheduler<
 
 	private async run(): Promise<void> {
 		while (true) {
-			const task = this.pickNextTask();
-			if (task) {
-				// Any other task that runs before the current task is done interrupts it, also while it waits
+			const next = this.pickNextTask();
+			if (next) {
+				const { task, candidate } = next;
+				// A task with a higher priority interrupts the current task, also while it waits.
+				// So does a task that runs in place of a group member with a higher priority.
 				if (
 					this._currentTask &&
 					this._currentTask !== task &&
 					this._currentTask.interrupt ===
-						TaskInterruptBehavior.Restart
+						TaskInterruptBehavior.Restart &&
+					candidate.priority < this._currentTask.priority
 				) {
 					// The current task needs to be restarted after being interrupted, so reset it
 					const interrupted = this._currentTask;
@@ -724,7 +734,7 @@ export class TaskScheduler<
 					// The reset task must be skipped, because it no longer waits and could be picked again.
 					if (
 						this._currentTask !== interrupted ||
-						this.pickNextTask(interrupted) !== task
+						this.pickNextTask(interrupted)?.task !== task
 					) {
 						continue;
 					}
@@ -739,15 +749,19 @@ export class TaskScheduler<
 				if (groupId && !this._groupHolders.has(groupId)) {
 					this._groupHolders.set(groupId, task);
 				}
-				// A started Restart task keeps its priority to itself until it is done
+				// A started Restart task keeps its priority to itself until it is done.
+				// A started Forbidden task keeps all other tasks from running until it is done.
+				// A task that runs in place of a group member must not hold back that member, so it takes neither hold.
+				const runsInPlace = candidate !== task;
 				if (
+					!runsInPlace &&
 					task.interrupt === TaskInterruptBehavior.Restart &&
 					!this._priorityHolders.has(task.priority)
 				) {
 					this._priorityHolders.set(task.priority, task);
 				}
-				// A started Forbidden task keeps all other tasks from running until it is done
 				if (
+					!runsInPlace &&
 					task.interrupt === TaskInterruptBehavior.Forbidden &&
 					!this._forbiddenHolder
 				) {
@@ -802,6 +816,8 @@ export class TaskScheduler<
 					// Skip the task until its promise settles, so other tasks can run in the meantime
 					this.trackWaitingTask(task, stepResult.promise);
 					this.endTurn(task);
+					// A task that runs in place of a group member uses up that member's turn
+					if (runsInPlace) this.endTurn(candidate);
 					continue;
 				} else if (stepResult.newState === TaskState.AwaitingTask) {
 					// The task spawned a sub-task. Replace it with the sub-task and continue executing
@@ -813,12 +829,14 @@ export class TaskScheduler<
 					// A subtask with a higher priority gets its own turn
 					this.assignNextTurn(stepResult.task);
 					this._tasks.add(stepResult.task);
+					if (runsInPlace) this.endTurn(candidate);
 					// Switching to the subtask must not count as interrupting the parent
 					this._currentTask = undefined;
 					// Continue with the next iteration
 					continue;
 				} else if (stepResult.newState === TaskState.Active) {
 					this.endTurn(task);
+					if (runsInPlace) this.endTurn(candidate);
 					continue;
 				} else {
 					// The step result is stale after a removal. Continue with the next iteration.
