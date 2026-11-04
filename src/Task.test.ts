@@ -1819,6 +1819,83 @@ test("A task resumes when its promise settles, even while another task waits ahe
 	await scheduler.stop();
 });
 
+test("A subtask keeps the queue position of a parent with the same priority, also after it waits", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+
+	const subtaskGate = createDeferredPromise<void>();
+	const parent = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("P");
+			yield;
+			yield {
+				priority: TaskPriority.Normal,
+				task: async function* () {
+					order.push("S1");
+					yield () => subtaskGate;
+					order.push("S2");
+				},
+			};
+		},
+	});
+
+	const otherGate = createDeferredPromise<void>();
+	const other = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("Q1");
+			yield () => otherGate;
+			order.push("Q2");
+		},
+	});
+
+	await wait(10);
+	t.expect(order).toStrictEqual(["P", "S1", "Q1"]);
+
+	// Settle both promises at once, so the queue position decides which task resumes first
+	otherGate.resolve();
+	subtaskGate.resolve();
+	await Promise.all([parent, other]);
+	t.expect(order).toStrictEqual(["P", "S1", "Q1", "S2", "Q2"]);
+
+	await scheduler.stop();
+});
+
+test("A subtask with a higher priority than its parent runs after tasks of its priority that were queued before it", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+
+	let high: Promise<void> | undefined;
+	const parent = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			high = scheduler.queueTask({
+				priority: TaskPriority.High,
+				task: async function* () {
+					order.push("H");
+				},
+			});
+			yield {
+				priority: TaskPriority.High,
+				task: async function* () {
+					order.push("S");
+				},
+			};
+		},
+	});
+
+	await parent;
+	await high;
+	t.expect(order).toStrictEqual(["H", "S"]);
+
+	await scheduler.stop();
+});
+
 test("The type-safe wrapper works correctly", async (t) => {
 	const scheduler = new TaskScheduler();
 	scheduler.start();

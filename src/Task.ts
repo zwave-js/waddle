@@ -190,12 +190,15 @@ export interface TaskConcurrencyGroup {
 	id: string;
 }
 
-function rootTask<TaskTag extends { id: string }>(
+/** Returns the outermost task in the chain of parents that have the same priority as the given task */
+function queuePositionTask<TaskTag extends { id: string }>(
 	task: Task<unknown, TaskTag>,
 ): Task<unknown, TaskTag> {
-	let root = task;
-	while (root.parent) root = root.parent;
-	return root;
+	let ret = task;
+	while (ret.parent && ret.parent.priority === task.priority) {
+		ret = ret.parent;
+	}
+	return ret;
 }
 
 /**
@@ -210,12 +213,14 @@ function compareTasks<TaskTag extends { id: string }>(
 	if (a.priority < b.priority) return 1;
 	if (a.priority > b.priority) return -1;
 
-	// A subtask takes the queue position of its outermost parent
-	const aRoot = rootTask(a);
-	const bRoot = rootTask(b);
-	if (aRoot.timestamp < bRoot.timestamp) return 1;
-	if (aRoot.timestamp > bRoot.timestamp) return -1;
-	if (aRoot !== bRoot) return Math.sign(bRoot.id - aRoot.id) as CompareResult;
+	// A subtask takes the queue position of the outermost parent with the same priority
+	const aPosition = queuePositionTask(a);
+	const bPosition = queuePositionTask(b);
+	if (aPosition.timestamp < bPosition.timestamp) return 1;
+	if (aPosition.timestamp > bPosition.timestamp) return -1;
+	if (aPosition !== bPosition) {
+		return Math.sign(bPosition.id - aPosition.id) as CompareResult;
+	}
 
 	return Math.sign(b.id - a.id) as CompareResult;
 }
