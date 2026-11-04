@@ -228,6 +228,8 @@ export class TaskScheduler<
 		this.compareTasks(a, b),
 	);
 	private _currentTask: Task<unknown, TaskTag> | undefined;
+	/** The priority the current task runs with. This is the priority of the group member it runs in place of, if any. */
+	private _currentPriority: TaskPriority | undefined;
 	/** The promises that queued tasks wait for, until they settle */
 	private _awaitedPromises = new Map<
 		Task<unknown, TaskTag>,
@@ -239,6 +241,13 @@ export class TaskScheduler<
 	private _priorityHolders = new Map<TaskPriority, Task<unknown, TaskTag>>();
 	/** The started `Forbidden` task that keeps all other tasks from running until it is done */
 	private _forbiddenHolder: Task<unknown, TaskTag> | undefined;
+	/** The task whose yielded promise factory queued each task */
+	private _spawners = new WeakMap<
+		Task<unknown, TaskTag>,
+		Task<unknown, TaskTag>
+	>();
+	/** The task whose yielded promise factory is being called right now */
+	private _spawningTask: Task<unknown, TaskTag> | undefined;
 	/** The order in which the turn owners of tasks with the same priority take their next turn */
 	private _turns = new WeakMap<Task<unknown, TaskTag>, number>();
 	private _turnCounter = 0;
@@ -286,6 +295,7 @@ export class TaskScheduler<
 
 	public queueTask<T>(builder: TaskBuilder<T, TaskTag>): Promise<T> {
 		const task = this.createTask(builder);
+		if (this._spawningTask) this._spawners.set(task, this._spawningTask);
 		this.assignNextTurn(task);
 		this._tasks.add(task);
 		if (this.verbose) {
@@ -481,6 +491,18 @@ export class TaskScheduler<
 		return taskToRun;
 	}
 
+	/** Returns whether the promise factory of one of `spawners` queued `task` or one of its parents */
+	private isSpawnedByAny(
+		task: Task<unknown, TaskTag>,
+		spawners: Set<Task<unknown, TaskTag>>,
+	): boolean {
+		for (const t of selfAndParents(task)) {
+			const spawner = this._spawners.get(t);
+			if (spawner && spawners.has(spawner)) return true;
+		}
+		return false;
+	}
+
 	/**
 	 * Returns the queued task that may take the next step, other than `skip`.
 	 * `candidate` is the task it runs for. This differs from `task` when `task` runs in place of a group member.
@@ -491,14 +513,17 @@ export class TaskScheduler<
 		| { task: Task<unknown, TaskTag>; candidate: Task<unknown, TaskTag> }
 		| undefined {
 		let floorPriority: TaskPriority | undefined;
+		const waitingTasks = new Set<Task<unknown, TaskTag>>();
 		for (const candidate of this._tasks) {
 			if (candidate === skip) continue;
-			// While a task waits for a promise, tasks with a lower priority may not run
+			// While a task waits for a promise, tasks with a lower priority may not run.
+			// A task queued by the promise factory of a waiting task may still run, because the promise may wait for it.
 			if (
 				floorPriority != undefined &&
-				candidate.priority > floorPriority
+				candidate.priority > floorPriority &&
+				!this.isSpawnedByAny(candidate, waitingTasks)
 			) {
-				return;
+				continue;
 			}
 			// Skip tasks that wait for a started Forbidden task, or a started Restart task with the same priority
 			if (this.isHeldBack(candidate)) continue;
@@ -517,6 +542,7 @@ export class TaskScheduler<
 			// A task that waits in place of a group member keeps tasks with a lower priority than that member from running.
 			if (this._awaitedPromises.has(taskToRun)) {
 				floorPriority ??= candidate.priority;
+				waitingTasks.add(taskToRun);
 				continue;
 			}
 			return { task: taskToRun, candidate };
@@ -615,7 +641,13 @@ export class TaskScheduler<
 						result: value,
 					};
 				} else if (value != undefined) {
-					const waitFor = evalOrStatic(value);
+					let waitFor;
+					self._spawningTask = task;
+					try {
+						waitFor = evalOrStatic(value);
+					} finally {
+						self._spawningTask = undefined;
+					}
 					if (waitFor instanceof Promise) {
 						state = TaskState.AwaitingPromise;
 						// Ignore the promise's result if this task was reset in the meantime
@@ -724,7 +756,8 @@ export class TaskScheduler<
 					this._currentTask !== task &&
 					this._currentTask.interrupt ===
 						TaskInterruptBehavior.Restart &&
-					candidate.priority < this._currentTask.priority
+					candidate.priority <
+						(this._currentPriority ?? this._currentTask.priority)
 				) {
 					// The current task needs to be restarted after being interrupted, so reset it
 					const interrupted = this._currentTask;
@@ -732,14 +765,17 @@ export class TaskScheduler<
 					await interrupted.reset();
 					// Re-evaluate the queue if it changed during the reset.
 					// The reset task must be skipped, because it no longer waits and could be picked again.
+					const repicked = this.pickNextTask(interrupted);
 					if (
 						this._currentTask !== interrupted ||
-						this.pickNextTask(interrupted)?.task !== task
+						repicked?.task !== task ||
+						repicked.candidate !== candidate
 					) {
 						continue;
 					}
 				}
 				this._currentTask = task;
+				this._currentPriority = candidate.priority;
 
 				if (this.verbose) {
 					console.log(`Stepping through task: ${getTaskName(task)}`);

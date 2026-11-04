@@ -2642,6 +2642,120 @@ test("A task that waits while a Restart task holds its priority keeps lower prio
 	await scheduler.stop();
 });
 
+test("A group member that waits in place of a higher-priority member lets a task queued by its promise run", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "group" };
+
+	// Task 1 has a low priority, holds the group, then waits for task 2, which its promise queues
+	const gate1 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Low,
+		group,
+		task: async function* () {
+			order.push("1a");
+			yield () => gate1;
+			yield () =>
+				scheduler.queueTask({
+					priority: TaskPriority.Normal,
+					task: async function* () {
+						order.push("2a");
+					},
+				});
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	// Task 3 has a high priority and waits for the group, so task 1 runs in its place
+	const task3 = scheduler.queueTask({
+		priority: TaskPriority.High,
+		group,
+		task: async function* () {
+			order.push("3a");
+		},
+	});
+
+	// Task 2 has a lower priority than task 3, but task 1 waits for it
+	gate1.resolve();
+	await Promise.all([task1, task3]);
+	t.expect(order).toStrictEqual(["1a", "2a", "1b", "3a"]);
+
+	await scheduler.stop();
+});
+
+test("Two Restart subtasks that run in place of members with the same priority do not restart each other", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const groups: TaskConcurrencyGroup[] = [{ id: "group1" }, { id: "group2" }];
+
+	// Tasks 1 and 2 have a low priority, each holds a group, waits,
+	// then spawns a subtask that must be restarted after an interruption
+	const gates = [
+		createDeferredPromise<void>(),
+		createDeferredPromise<void>(),
+	];
+	const starts = [0, 0];
+	const createParent = (n: number) =>
+		scheduler.queueTask({
+			priority: TaskPriority.Low,
+			group: groups[n - 1],
+			task: async function* () {
+				order.push(`${n}a`);
+				yield () => gates[n - 1];
+				yield {
+					priority: TaskPriority.Normal,
+					interrupt: TaskInterruptBehavior.Restart,
+					task: async function* () {
+						const run = ++starts[n - 1];
+						order.push(`${n}b${run}`);
+						// Stop after a few restarts, so a regression fails instead of hanging
+						if (run > 3) return;
+						yield;
+						order.push(`${n}c`);
+					},
+				};
+			},
+		});
+	const task1 = createParent(1);
+	const task2 = createParent(2);
+	await wait(1);
+
+	// Tasks 3 and 4 have a high priority and wait for the groups of tasks 1 and 2
+	const createWaiter = (n: number, group: TaskConcurrencyGroup) =>
+		scheduler.queueTask({
+			priority: TaskPriority.High,
+			group,
+			task: async function* () {
+				order.push(`${n}a`);
+			},
+		});
+	const task3 = createWaiter(3, groups[0]);
+	const task4 = createWaiter(4, groups[1]);
+
+	// The subtasks take turns in place of tasks 3 and 4.
+	// Both have the same priority there, so neither restarts the other.
+	gates[0].resolve();
+	gates[1].resolve();
+	await Promise.all([task1, task2, task3, task4]);
+	t.expect(order).toStrictEqual([
+		"1a",
+		"2a",
+		"1b1",
+		"2b1",
+		"1c",
+		"3a",
+		"2c",
+		"4a",
+	]);
+
+	await scheduler.stop();
+});
+
 test("Tasks with the same priority take turns at each yield", async (t) => {
 	const scheduler = new TaskScheduler();
 	scheduler.start();
