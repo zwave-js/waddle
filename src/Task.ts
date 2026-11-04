@@ -240,6 +240,8 @@ export class TaskScheduler<
 		compareTasks,
 	);
 	private _currentTask: Task<unknown, TaskTag> | undefined;
+	/** Whether the last step of the current task ended with waiting for a promise */
+	private _currentTaskWaited = false;
 	/** The promises that queued tasks wait for, until they settle */
 	private _waitingFor = new Map<Task<unknown, TaskTag>, Promise<unknown>>();
 	/** The task in each concurrency group that has started and not finished yet */
@@ -405,7 +407,7 @@ export class TaskScheduler<
 		return true;
 	}
 
-	/** Returns the first queued task that may take a step now */
+	/** Returns the queued task that may take the next step */
 	private pickNextTask(): Task<unknown, TaskTag> | undefined {
 		let waitingPriority: TaskPriority | undefined;
 		for (const task of this._tasks) {
@@ -422,6 +424,15 @@ export class TaskScheduler<
 			if (this._waitingFor.has(task)) {
 				waitingPriority ??= task.priority;
 				continue;
+			}
+			// The current task keeps running ahead of tasks with the same priority until it waits or finishes
+			const current = this._currentTask;
+			if (
+				current &&
+				!this._currentTaskWaited &&
+				current.priority === task.priority
+			) {
+				return current;
 			}
 			return task;
 		}
@@ -646,6 +657,7 @@ export class TaskScheduler<
 					}
 				}
 				this._currentTask = nextTask;
+				this._currentTaskWaited = false;
 
 				// Capture the current task, so concurrent removals can be detected after each await
 				const task = nextTask;
@@ -706,6 +718,7 @@ export class TaskScheduler<
 
 					// Skip the task until its promise settles, so other tasks can run in the meantime
 					this.trackWaitingTask(task, stepResult.promise);
+					this._currentTaskWaited = true;
 					if (task.interrupt !== TaskInterruptBehavior.Forbidden) {
 						continue;
 					}

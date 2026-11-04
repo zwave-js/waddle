@@ -1953,6 +1953,47 @@ test("A waiting Restart task is not restarted when a task with the same priority
 	await scheduler.stop();
 });
 
+test("The current task keeps running ahead of an older task with the same priority whose promise settled", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+
+	// Task 1 waits for a promise
+	const gate1 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("1a");
+			yield () => gate1;
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	// Task 2 starts while task 1 waits and settles task 1's promise during its first step
+	let starts = 0;
+	const task2 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* () {
+			order.push(`2a${++starts}`);
+			gate1.resolve();
+			await wait(1);
+			yield;
+			order.push("2b");
+			yield;
+			order.push("2c");
+		},
+	});
+
+	// Task 1 is older, but task 2 keeps running without a restart until it is done
+	await Promise.all([task1, task2]);
+	t.expect(order).toStrictEqual(["1a", "2a1", "2b", "2c", "1b"]);
+
+	await scheduler.stop();
+});
+
 test("The type-safe wrapper works correctly", async (t) => {
 	const scheduler = new TaskScheduler();
 	scheduler.start();
