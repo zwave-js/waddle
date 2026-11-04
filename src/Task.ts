@@ -451,19 +451,19 @@ export class TaskScheduler<
 	}
 
 	/**
-	 * Returns the queued task that must take the next step before the given task can run.
-	 * When the given task does not wait for a concurrency group, this is the task itself.
+	 * Returns the queued task that must take the next step so `candidate` can run.
+	 * When `candidate` does not wait for a concurrency group, this is `candidate` itself.
 	 *
-	 * Example: Task A waits for group G. Task B holds G and waits for its subtask C. C waits for group H, which task D holds.
+	 * Example: Candidate A waits for group G. Task B holds G and waits for its subtask C. C waits for group H, which task D holds.
 	 * Then D must run first, so this returns D.
 	 *
 	 * Returns `undefined` when the tasks wait for each other's groups.
 	 */
 	private findTaskToRun(
-		task: Task<unknown, TaskTag>,
+		candidate: Task<unknown, TaskTag>,
 	): Task<unknown, TaskTag> | undefined {
 		const visited = new Set<Task<unknown, TaskTag>>();
-		let taskToRun: Task<unknown, TaskTag> | undefined = task;
+		let taskToRun: Task<unknown, TaskTag> | undefined = candidate;
 		while (taskToRun && this.isBlockedByGroup(taskToRun)) {
 			if (visited.has(taskToRun)) return;
 			visited.add(taskToRun);
