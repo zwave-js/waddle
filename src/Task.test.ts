@@ -269,13 +269,14 @@ test("Higher priority tasks interrupt lower priority ones, part 2", async (t) =>
 
 	await Promise.all([task1, task2, task3]);
 
+	// Tasks 2 and 3 have the same priority, so they take turns
 	t.expect(order).toStrictEqual([
 		"1a",
 		"2a",
-		"2b",
-		"2c",
 		"3a",
+		"2b",
 		"3b",
+		"2c",
 		"3c",
 		"1b",
 		"1c",
@@ -1830,51 +1831,44 @@ test("A task resumes when its promise settles, even while another task waits ahe
 	await scheduler.stop();
 });
 
-test("A subtask keeps the queue position of a parent with the same priority, also after it waits", async (t) => {
+test("A subtask takes turns in place of a parent with the same priority", async (t) => {
 	const scheduler = new TaskScheduler();
 	scheduler.start();
 
 	const order: string[] = [];
 
-	// Task 1 takes a step, then spawns subtask 2 with the same priority
-	const gate2 = createDeferredPromise<void>();
+	// Task 1 takes a step, then spawns subtask 2 with the same priority, then takes another step
 	const task1 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		task: async function* () {
 			order.push("1a");
-			yield;
 			yield {
 				priority: TaskPriority.Normal,
 				task: async function* () {
 					order.push("2a");
-					yield () => gate2;
+					yield;
 					order.push("2b");
 				},
 			};
+			order.push("1b");
 		},
 	});
 
-	// Task 3 is queued after task 1, but before subtask 2 is spawned
-	const gate3 = createDeferredPromise<void>();
 	const task3 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		task: async function* () {
 			order.push("3a");
-			yield () => gate3;
+			yield;
 			order.push("3b");
+			yield;
+			order.push("3c");
 		},
 	});
 
-	// Subtask 2 runs right after its parent, before task 3 starts
-	await wait(10);
-	t.expect(order).toStrictEqual(["1a", "2a", "3a"]);
-
-	// Settle both promises at once, so the queue position decides which task resumes first.
-	// Subtask 2 has the queue position of task 1, which is ahead of task 3.
-	gate3.resolve();
-	gate2.resolve();
+	// Spawning subtask 2 ends the turn of task 1.
+	// Task 1 continues in the turn subtask 2 finished in.
 	await Promise.all([task1, task3]);
-	t.expect(order).toStrictEqual(["1a", "2a", "3a", "2b", "3b"]);
+	t.expect(order).toStrictEqual(["1a", "3a", "2a", "3b", "2b", "1b", "3c"]);
 
 	await scheduler.stop();
 });
@@ -1913,54 +1907,44 @@ test("A subtask with a higher priority than its parent runs after tasks of its p
 	await scheduler.stop();
 });
 
-test("A waiting Restart task is restarted after a task with the same priority runs in between", async (t) => {
+test("A started Restart task keeps its priority to itself while it waits", async (t) => {
 	const scheduler = new TaskScheduler();
 	scheduler.start();
 
 	const order: string[] = [];
 
-	// Task 1 may be restarted and waits for a new promise each time it starts
-	const gates = [
-		createDeferredPromise<void>(),
-		createDeferredPromise<void>(),
-	];
+	// Task 1 may be restarted and waits for a promise
+	const gate1 = createDeferredPromise<void>();
 	let starts = 0;
 	const task1 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		interrupt: TaskInterruptBehavior.Restart,
 		task: async function* () {
-			const run = ++starts;
-			order.push(`1a${run}`);
-			yield () => gates[run - 1];
-			order.push(`1b${run}`);
+			order.push(`1a${++starts}`);
+			yield () => gate1;
+			order.push("1b");
 		},
 	});
 	await wait(1);
 
-	// Task 2 runs while task 1 waits, which interrupts task 1.
-	// Task 1 is older, but task 2 must still get to run until it is done.
+	// Task 2 has the same priority, so it must not run while task 1 waits
 	const task2 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		task: async function* () {
 			order.push("2a");
-			yield;
-			order.push("2b");
 		},
 	});
-	await task2;
+	await wait(10);
+	t.expect(order).toStrictEqual(["1a1"]);
 
-	// Task 1 starts over and waits for its second promise
-	await wait(1);
-	t.expect(order).toStrictEqual(["1a1", "2a", "2b", "1a2"]);
-
-	gates[1].resolve();
-	await task1;
-	t.expect(order).toStrictEqual(["1a1", "2a", "2b", "1a2", "1b2"]);
+	gate1.resolve();
+	await Promise.all([task1, task2]);
+	t.expect(order).toStrictEqual(["1a1", "1b", "2a"]);
 
 	await scheduler.stop();
 });
 
-test("The current task keeps running ahead of an older task with the same priority whose promise settled", async (t) => {
+test("A started Restart task keeps running ahead of an older task with the same priority whose promise settled", async (t) => {
 	const scheduler = new TaskScheduler();
 	scheduler.start();
 
@@ -1994,9 +1978,213 @@ test("The current task keeps running ahead of an older task with the same priori
 		},
 	});
 
-	// Task 1 is older, but task 2 keeps running without a restart until it is done
+	// Task 1 has the next turn, but task 2 keeps running without a restart until it is done
 	await Promise.all([task1, task2]);
 	t.expect(order).toStrictEqual(["1a", "2a1", "2b", "2c", "1b"]);
+
+	await scheduler.stop();
+});
+
+test("Two Restart tasks with the same priority that both wait do not restart each other", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+
+	const starts = [0, 0];
+	const createTask = (n: number) =>
+		scheduler.queueTask({
+			priority: TaskPriority.Normal,
+			interrupt: TaskInterruptBehavior.Restart,
+			task: async function* () {
+				order.push(`${n}a${++starts[n - 1]}`);
+				yield () => wait(5);
+				order.push(`${n}b`);
+			},
+		});
+
+	await Promise.all([createTask(1), createTask(2)]);
+	t.expect(order).toStrictEqual(["1a1", "1b", "2a1", "2b"]);
+
+	await scheduler.stop();
+});
+
+test("A higher-priority task restarts a started Restart task", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+
+	// Task 1 may be restarted and waits for a new promise each time it starts
+	const gates = [
+		createDeferredPromise<void>(),
+		createDeferredPromise<void>(),
+	];
+	let starts = 0;
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* () {
+			const run = ++starts;
+			order.push(`1a${run}`);
+			yield () => gates[run - 1];
+			order.push(`1b${run}`);
+		},
+	});
+	await wait(1);
+
+	const task2 = scheduler.queueTask({
+		priority: TaskPriority.High,
+		task: async function* () {
+			order.push("2a");
+		},
+	});
+	await task2;
+
+	// Task 1 starts over and waits for its second promise
+	await wait(1);
+	t.expect(order).toStrictEqual(["1a1", "2a", "1a2"]);
+
+	gates[1].resolve();
+	await task1;
+	t.expect(order).toStrictEqual(["1a1", "2a", "1a2", "1b2"]);
+
+	await scheduler.stop();
+});
+
+test("A started Restart task lets the holder of a concurrency group run when its subtask waits for that group", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "group" };
+
+	// Task 1 holds the group and waits
+	const gate1 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		group,
+		task: async function* () {
+			order.push("1a");
+			yield () => gate1;
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	// Task 2 keeps the priority to itself, then spawns a subtask in the group of task 1
+	const task2 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* () {
+			order.push("2a");
+			yield {
+				priority: TaskPriority.Normal,
+				group,
+				task: async function* () {
+					order.push("3a");
+				},
+			};
+			order.push("2b");
+		},
+	});
+	await wait(1);
+
+	// Task 1 may finish, because the subtask of task 2 waits for it
+	gate1.resolve();
+	await Promise.all([task1, task2]);
+	t.expect(order).toStrictEqual(["1a", "2a", "1b", "3a", "2b"]);
+
+	await scheduler.stop();
+});
+
+test("Tasks with the same priority take turns at each yield", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+
+	const createTask = (n: number) =>
+		scheduler.queueTask({
+			priority: TaskPriority.Normal,
+			task: async function* () {
+				order.push(`${n}a`);
+				yield;
+				order.push(`${n}b`);
+				yield;
+				order.push(`${n}c`);
+			},
+		});
+
+	await Promise.all([createTask(1), createTask(2)]);
+	t.expect(order).toStrictEqual(["1a", "2a", "1b", "2b", "1c", "2c"]);
+
+	await scheduler.stop();
+});
+
+test("Tasks in the same concurrency group do not take turns with each other", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "group" };
+
+	const createTask = (n: number, group?: TaskConcurrencyGroup) =>
+		scheduler.queueTask({
+			priority: TaskPriority.Normal,
+			group,
+			task: async function* () {
+				order.push(`${n}a`);
+				yield;
+				order.push(`${n}b`);
+			},
+		});
+
+	// Task 3 is not in the group, so it takes turns with the group members
+	await Promise.all([
+		createTask(1, group),
+		createTask(2, group),
+		createTask(3),
+	]);
+	t.expect(order).toStrictEqual(["1a", "3a", "1b", "2a", "3b", "2b"]);
+
+	await scheduler.stop();
+});
+
+test("A task resumes at the next yield of the current task once its promise settles", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+
+	// Task 1 waits for a promise
+	const gate1 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("1a");
+			yield () => gate1;
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	// Task 2 settles the promise of task 1 during its first step
+	const task2 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("2a");
+			gate1.resolve();
+			await wait(1);
+			yield;
+			order.push("2b");
+			yield;
+			order.push("2c");
+		},
+	});
+
+	await Promise.all([task1, task2]);
+	t.expect(order).toStrictEqual(["1a", "2a", "1b", "2b", "2c"]);
 
 	await scheduler.stop();
 });
