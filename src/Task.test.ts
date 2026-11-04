@@ -2189,6 +2189,108 @@ test("A waiting Restart task that holds a group finishes before a member of its 
 	await scheduler.stop();
 });
 
+test("A Forbidden task keeps other tasks from running while its subtask runs", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+
+	// Task 1 may not be interrupted and spawns subtask 2
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Forbidden,
+		task: async function* () {
+			order.push("1a");
+			yield {
+				priority: TaskPriority.Normal,
+				task: async function* () {
+					order.push("2a");
+					// Task 3 has the same priority and task 4 has a higher one
+					task3 = createTask(3, TaskPriority.Normal);
+					task4 = createTask(4, TaskPriority.High);
+					yield;
+					order.push("2b");
+				},
+			};
+			order.push("1b");
+		},
+	});
+
+	const createTask = (n: number, priority: TaskPriority) =>
+		scheduler.queueTask({
+			priority,
+			task: async function* () {
+				order.push(`${n}a`);
+				yield;
+				order.push(`${n}b`);
+			},
+		});
+	let task3: Promise<void> | undefined;
+	let task4: Promise<void> | undefined;
+
+	// Tasks 3 and 4 only run after task 1 is done
+	await task1;
+	await Promise.all([task3, task4]);
+	t.expect(order).toStrictEqual([
+		"1a",
+		"2a",
+		"2b",
+		"1b",
+		"4a",
+		"4b",
+		"3a",
+		"3b",
+	]);
+
+	await scheduler.stop();
+});
+
+test("A Forbidden task lets the holder of a concurrency group run when its subtask waits for that group", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "group" };
+
+	// Task 1 holds the group and waits
+	const gate1 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		group,
+		task: async function* () {
+			order.push("1a");
+			yield () => gate1;
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	// Task 2 may not be interrupted and spawns a subtask in the group of task 1
+	const task2 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Forbidden,
+		task: async function* () {
+			order.push("2a");
+			yield {
+				priority: TaskPriority.Normal,
+				group,
+				task: async function* () {
+					order.push("3a");
+				},
+			};
+			order.push("2b");
+		},
+	});
+	await wait(1);
+
+	// Task 1 may finish, because the subtask of task 2 waits for it
+	gate1.resolve();
+	await Promise.all([task1, task2]);
+	t.expect(order).toStrictEqual(["1a", "2a", "1b", "3a", "2b"]);
+
+	await scheduler.stop();
+});
+
 test("Tasks with the same priority take turns at each yield", async (t) => {
 	const scheduler = new TaskScheduler();
 	scheduler.start();

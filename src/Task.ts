@@ -105,6 +105,17 @@ export interface TaskBuilder<
 export type TaskReturnType<T extends TaskBuilder<unknown>> =
 	T extends TaskBuilder<infer R> ? R : never;
 
+/** Returns whether `parent` is the given task or one of the tasks waiting for it */
+function isSelfOrParent<TaskTag extends { id: string }>(
+	task: Task<unknown, TaskTag>,
+	parent: Task<unknown, TaskTag>,
+): boolean {
+	for (const t of selfAndParents(task)) {
+		if (t === parent) return true;
+	}
+	return false;
+}
+
 /** Yields the given task, then each task waiting for it, up to the outermost one */
 function* selfAndParents<TaskTag extends { id: string }>(
 	task: Task<unknown, TaskTag>,
@@ -221,6 +232,8 @@ export class TaskScheduler<
 	private _groupHolders = new Map<string, Task<unknown, TaskTag>>();
 	/** The started `Restart` task that keeps each priority to itself until it is done */
 	private _priorityHolders = new Map<TaskPriority, Task<unknown, TaskTag>>();
+	/** The started `Forbidden` task that keeps all other tasks from running until it is done */
+	private _forbiddenHolder: Task<unknown, TaskTag> | undefined;
 	/** The order in which the turn owners of tasks with the same priority take their next turn */
 	private _turns = new WeakMap<Task<unknown, TaskTag>, number>();
 	private _turnCounter = 0;
@@ -389,6 +402,9 @@ export class TaskScheduler<
 		if (this._priorityHolders.get(task.priority) === task) {
 			this._priorityHolders.delete(task.priority);
 		}
+		if (this._forbiddenHolder === task) {
+			this._forbiddenHolder = undefined;
+		}
 	}
 
 	/**
@@ -417,25 +433,31 @@ export class TaskScheduler<
 		const holder = this._groupHolders.get(groupId);
 		if (!holder) return false;
 		// A group held by one of its parents counts as held by the task itself
-		for (const t of selfAndParents(task)) {
-			if (t === holder) return false;
-		}
-		return true;
-	}
-
-	/** Returns whether a started `Restart` task that is not one of the given task's parents holds the task's priority */
-	private isBlockedByPriority(task: Task<unknown, TaskTag>): boolean {
-		const holder = this._priorityHolders.get(task.priority);
-		if (!holder) return false;
-		for (const t of selfAndParents(task)) {
-			if (t === holder) return false;
-		}
-		return true;
+		return !isSelfOrParent(task, holder);
 	}
 
 	/**
-	 * Follows a task to the queued holder of the concurrency group it waits for, and on through further groups.
-	 * Returns the task itself when it does not wait for a group, and `undefined` when the tasks wait for each other's groups.
+	 * Returns whether a started task that is not one of the given task's parents holds the task back.
+	 * A `Forbidden` task holds back all other tasks. A `Restart` task holds back the tasks with its priority.
+	 */
+	private isHeldBack(task: Task<unknown, TaskTag>): boolean {
+		for (const holder of [
+			this._forbiddenHolder,
+			this._priorityHolders.get(task.priority),
+		]) {
+			if (holder && !isSelfOrParent(task, holder)) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Returns the queued task that must take the next step before the given task can run.
+	 * When the given task does not wait for a concurrency group, this is the task itself.
+	 *
+	 * Example: Task A waits for group G. Task B holds G and waits for its subtask C. C waits for group H, which task D holds.
+	 * Then D must run first, so this returns D.
+	 *
+	 * Returns `undefined` when the tasks wait for each other's groups.
 	 */
 	private findRunnerFor(
 		task: Task<unknown, TaskTag>,
@@ -466,16 +488,16 @@ export class TaskScheduler<
 			) {
 				return;
 			}
-			// Skip tasks that wait for a started Restart task with the same priority
-			if (this.isBlockedByPriority(task)) continue;
+			// Skip tasks that wait for a started Forbidden task, or a started Restart task with the same priority
+			if (this.isHeldBack(task)) continue;
 			const runner = this.findRunnerFor(task);
 			if (!runner || runner === skip) continue;
 			// A task that waits for another member of its concurrency group lets that member run in its place.
-			// It does so only when the member has a lower priority or a Restart task holds the member's priority.
+			// It does so only when the member has a lower priority or another task holds the member back.
 			if (
 				runner !== task &&
 				runner.priority <= task.priority &&
-				!this.isBlockedByPriority(runner)
+				!this.isHeldBack(runner)
 			) {
 				continue;
 			}
@@ -680,11 +702,7 @@ export class TaskScheduler<
 
 	private async run(): Promise<void> {
 		while (true) {
-			// A task that may not be interrupted keeps running, even while it waits
-			const nextTask =
-				this._currentTask?.interrupt === TaskInterruptBehavior.Forbidden
-					? this._currentTask
-					: this.pickNextTask();
+			const nextTask = this.pickNextTask();
 			if (nextTask) {
 				// Any other task that runs before the current task is done interrupts it, also while it waits
 				if (
@@ -726,6 +744,13 @@ export class TaskScheduler<
 					!this._priorityHolders.has(task.priority)
 				) {
 					this._priorityHolders.set(task.priority, task);
+				}
+				// A started Forbidden task keeps all other tasks from running until it is done
+				if (
+					task.interrupt === TaskInterruptBehavior.Forbidden &&
+					!this._forbiddenHolder
+				) {
+					this._forbiddenHolder = task;
 				}
 
 				const finalizeCurrentTask = async () => {
@@ -776,9 +801,7 @@ export class TaskScheduler<
 					// Skip the task until its promise settles, so other tasks can run in the meantime
 					this.trackWaitingTask(task, stepResult.promise);
 					this.endTurn(task);
-					if (task.interrupt !== TaskInterruptBehavior.Forbidden) {
-						continue;
-					}
+					continue;
 				} else if (stepResult.newState === TaskState.AwaitingTask) {
 					// The task spawned a sub-task. Replace it with the sub-task and continue executing
 					if (this.verbose) {

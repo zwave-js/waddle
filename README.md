@@ -184,10 +184,10 @@ A task is interrupted when a task with a higher priority runs before it is done.
 | ------------------ | -------------------------------------------------------- | -------------------------------------------------------------------------- |
 | `Resume` (default) | The task pauses and later continues where it left off    | Take turns with the task at each `yield`                                   |
 | `Restart`          | The task pauses and later starts over from the beginning | Run after the task is done, also while it waits for a Promise or a subtask |
-| `Forbidden`        | The task keeps running until it is done                  | Run after the task is done                                                 |
+| `Forbidden`        | The task keeps running until it is done                  | Run after the task is done, also while it waits for a Promise or a subtask |
 
 So towards tasks with the same priority, a started `Restart` task behaves like a `Forbidden` task.
-A task that holds a [concurrency group](#task-concurrency-groups) may still run while a `Restart` task keeps its priority, if a subtask of the `Restart` task waits for that group.
+A task that holds a [concurrency group](#task-concurrency-groups) may still run while a started `Restart` or `Forbidden` task holds it back, if a subtask of that task waits for the group.
 
 #### Waiting while yielding
 
