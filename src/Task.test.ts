@@ -1913,27 +1913,32 @@ test("A subtask with a higher priority than its parent runs after tasks of its p
 	await scheduler.stop();
 });
 
-test("A waiting Restart task is not restarted when a task with the same priority runs in between", async (t) => {
+test("A waiting Restart task is restarted after a task with the same priority runs in between", async (t) => {
 	const scheduler = new TaskScheduler();
 	scheduler.start();
 
 	const order: string[] = [];
 
-	// Task 1 may be restarted and waits for a promise
-	const gate1 = createDeferredPromise<void>();
+	// Task 1 may be restarted and waits for a new promise each time it starts
+	const gates = [
+		createDeferredPromise<void>(),
+		createDeferredPromise<void>(),
+	];
 	let starts = 0;
 	const task1 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		interrupt: TaskInterruptBehavior.Restart,
 		task: async function* () {
-			order.push(`1a${++starts}`);
-			yield () => gate1;
-			order.push("1b");
+			const run = ++starts;
+			order.push(`1a${run}`);
+			yield () => gates[run - 1];
+			order.push(`1b${run}`);
 		},
 	});
 	await wait(1);
 
-	// Task 2 has the same priority, so it runs while task 1 waits without interrupting it
+	// Task 2 runs while task 1 waits, which interrupts task 1.
+	// Task 1 is older, but task 2 must still get to run until it is done.
 	const task2 = scheduler.queueTask({
 		priority: TaskPriority.Normal,
 		task: async function* () {
@@ -1943,12 +1948,14 @@ test("A waiting Restart task is not restarted when a task with the same priority
 		},
 	});
 	await task2;
-	t.expect(order).toStrictEqual(["1a1", "2a", "2b"]);
 
-	// Task 1 continues where it left off
-	gate1.resolve();
+	// Task 1 starts over and waits for its second promise
+	await wait(1);
+	t.expect(order).toStrictEqual(["1a1", "2a", "2b", "1a2"]);
+
+	gates[1].resolve();
 	await task1;
-	t.expect(order).toStrictEqual(["1a1", "2a", "2b", "1b"]);
+	t.expect(order).toStrictEqual(["1a1", "2a", "2b", "1a2", "1b2"]);
 
 	await scheduler.stop();
 });

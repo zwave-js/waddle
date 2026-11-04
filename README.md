@@ -179,7 +179,8 @@ export enum TaskInterruptBehavior {
 ```
 
 By default, all tasks will simply be resumed where they left off when the scheduler wants to run them again.
-You can also specify that a task needs to be restarted from the beginning after being interrupted by a higher priority task.
+You can also specify that a task needs to be restarted from the beginning after being interrupted.
+A task is interrupted when another task runs before it is done. This happens when a task with a higher priority is pending, or when another task runs while the task waits for a Promise.
 Additionally, some tasks can be marked as not interruptible. This means that even if they reach a point where they could be interrupted and a higher priority task is pending, they will not be interrupted.
 
 #### Waiting while yielding

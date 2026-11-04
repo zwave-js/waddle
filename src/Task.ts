@@ -407,10 +407,13 @@ export class TaskScheduler<
 		return true;
 	}
 
-	/** Returns the queued task that may take the next step */
-	private pickNextTask(): Task<unknown, TaskTag> | undefined {
+	/** Returns the queued task that may take the next step, other than `skip` */
+	private pickNextTask(
+		skip?: Task<unknown, TaskTag>,
+	): Task<unknown, TaskTag> | undefined {
 		let waitingPriority: TaskPriority | undefined;
 		for (const task of this._tasks) {
+			if (task === skip) continue;
 			// While a task waits for a promise, tasks with a lower priority may not run
 			if (
 				waitingPriority != undefined &&
@@ -429,6 +432,7 @@ export class TaskScheduler<
 			const current = this._currentTask;
 			if (
 				current &&
+				current !== skip &&
 				!this._currentTaskWaited &&
 				current.priority === task.priority
 			) {
@@ -635,23 +639,22 @@ export class TaskScheduler<
 					? this._currentTask
 					: this.pickNextTask();
 			if (nextTask) {
-				// Only a task with a higher priority interrupts the current task.
-				// Tasks with the same priority just run in between.
+				// Any other task that runs before the current task is done interrupts it, also while it waits
 				if (
 					this._currentTask &&
 					this._currentTask !== nextTask &&
 					this._currentTask.interrupt ===
-						TaskInterruptBehavior.Restart &&
-					nextTask.priority < this._currentTask.priority
+						TaskInterruptBehavior.Restart
 				) {
 					// The current task needs to be restarted after being interrupted, so reset it
 					const interrupted = this._currentTask;
 					this.releaseTask(interrupted);
 					await interrupted.reset();
-					// Re-evaluate the queue if it changed during the reset
+					// Re-evaluate the queue if it changed during the reset.
+					// The reset task must be skipped, because it no longer waits and could be picked again.
 					if (
 						this._currentTask !== interrupted ||
-						this.pickNextTask() !== nextTask
+						this.pickNextTask(interrupted) !== nextTask
 					) {
 						continue;
 					}
