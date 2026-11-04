@@ -178,9 +178,16 @@ export enum TaskInterruptBehavior {
 }
 ```
 
-By default, all tasks will simply be resumed where they left off when the scheduler wants to run them again.
-You can also specify that a task needs to be restarted from the beginning after being interrupted by a higher priority task.
-Additionally, some tasks can be marked as not interruptible. This means that even if they reach a point where they could be interrupted and a higher priority task is pending, they will not be interrupted.
+A task is interrupted when a task with a higher priority runs before it is done. Once a task has started, the interrupt behavior decides what happens:
+
+| Behavior           | When a task with a higher priority is pending            | Tasks with the same priority                                               |
+| ------------------ | -------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `Resume` (default) | The task pauses and later continues where it left off    | Take turns with the task at each `yield`                                   |
+| `Restart`          | The task pauses and later starts over from the beginning | Run after the task is done, also while it waits for a Promise or a subtask |
+| `Forbidden`        | The task keeps running until it is done                  | Run after the task is done, also while it waits for a Promise or a subtask |
+
+So towards tasks with the same priority, a started `Restart` task behaves like a `Forbidden` task.
+A task that holds a [concurrency group](#task-concurrency-groups) may still run while a started `Restart` or `Forbidden` task holds it back, if a subtask of that task waits for the group.
 
 #### Waiting while yielding
 
@@ -356,7 +363,7 @@ This task will yield to the scheduler at each `yield` point in the `task1` and `
 
 #### Task Concurrency Groups
 
-By default, tasks are interleaved with other tasks when they wait for a Promise or task to be fulfilled. In some situations it may be desirable for a task to finish before another related task is allowed to run. Concurrency groups can be used to achieve this. They take precedence over task priorities, so tasks in the same concurrency group will not be interleaved with each other, even if a pending task has a higher priority. High-priority tasks outside the concurrency group will still interrupt lower-priority tasks in the group.
+By default, tasks with the same priority take turns at each `yield`. In some situations it may be desirable for a task to finish before another related task is allowed to run. Concurrency groups can be used to achieve this. They take precedence over task priorities, so tasks in the same concurrency group will not be interleaved with each other, even if a pending task has a higher priority. High-priority tasks outside the concurrency group will still interrupt lower-priority tasks in the group. While a member with a higher priority waits for the group, the member that holds the group runs with that priority.
 
 To use concurrency groups, specify the `group` property in the task builder:
 
