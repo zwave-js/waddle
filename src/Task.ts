@@ -459,19 +459,19 @@ export class TaskScheduler<
 	 *
 	 * Returns `undefined` when the tasks wait for each other's groups.
 	 */
-	private findRunnerFor(
+	private findTaskToRun(
 		task: Task<unknown, TaskTag>,
 	): Task<unknown, TaskTag> | undefined {
 		const visited = new Set<Task<unknown, TaskTag>>();
-		let runner: Task<unknown, TaskTag> | undefined = task;
-		while (runner && this.isBlockedByGroup(runner)) {
-			if (visited.has(runner)) return;
-			visited.add(runner);
-			runner = this.findLeafTask(
-				this._groupHolders.get(runner.group!.id)!,
+		let taskToRun: Task<unknown, TaskTag> | undefined = task;
+		while (taskToRun && this.isBlockedByGroup(taskToRun)) {
+			if (visited.has(taskToRun)) return;
+			visited.add(taskToRun);
+			taskToRun = this.findLeafTask(
+				this._groupHolders.get(taskToRun.group!.id)!,
 			);
 		}
-		return runner;
+		return taskToRun;
 	}
 
 	/** Returns the queued task that may take the next step, other than `skip` */
@@ -490,24 +490,24 @@ export class TaskScheduler<
 			}
 			// Skip tasks that wait for a started Forbidden task, or a started Restart task with the same priority
 			if (this.isHeldBack(task)) continue;
-			const runner = this.findRunnerFor(task);
-			if (!runner || runner === skip) continue;
+			const taskToRun = this.findTaskToRun(task);
+			if (!taskToRun || taskToRun === skip) continue;
 			// A task that waits for another member of its concurrency group lets that member run in its place.
 			// It does so only when the member has a lower priority or another task holds the member back.
 			if (
-				runner !== task &&
-				runner.priority <= task.priority &&
-				!this.isHeldBack(runner)
+				taskToRun !== task &&
+				taskToRun.priority <= task.priority &&
+				!this.isHeldBack(taskToRun)
 			) {
 				continue;
 			}
 			// Skip tasks that wait for a promise
-			if (this._waitingFor.has(runner)) {
+			if (this._waitingFor.has(taskToRun)) {
 				// Only a task that waits itself holds back tasks with a lower priority
-				if (runner === task) waitingPriority ??= task.priority;
+				if (taskToRun === task) waitingPriority ??= task.priority;
 				continue;
 			}
-			return runner;
+			return taskToRun;
 		}
 	}
 
