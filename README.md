@@ -522,7 +522,7 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 	Placeholder for next release:
 	### __WORK IN PROGRESS__
 -->
-### __WORK IN PROGRESS__
+### 1.3.2 (2026-11-05)
 
 - Fixed: Task scheduling now follows the README's rules for priorities, interrupt behaviors and concurrency groups, and it throws an error into the parent task when a subtask would cause a deadlock
 
