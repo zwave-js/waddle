@@ -363,7 +363,17 @@ This task will yield to the scheduler at each `yield` point in the `task1` and `
 
 #### Task Concurrency Groups
 
-By default, tasks with the same priority take turns at each `yield`. In some situations it may be desirable for a task to finish before another related task is allowed to run. Concurrency groups can be used to achieve this. They take precedence over task priorities, so tasks in the same concurrency group will not be interleaved with each other, even if a pending task has a higher priority. High-priority tasks outside the concurrency group will still interrupt lower-priority tasks in the group. While a member with a higher priority waits for the group, the member that holds the group runs in its place. It then runs with that member's priority and takes that member's turns. While it waits for a Promise, tasks with a lower priority than that member do not run, except for tasks that this Promise queued.
+By default, tasks with the same priority take turns at each `yield`. In some situations it may be desirable for a task to finish before another related task is allowed to run. Concurrency groups can be used to achieve this. A started task holds its group until it is done. This is how other pending tasks behave, compared to the priority of the task that holds the group:
+
+| Pending task      | Priority      | What happens                                                                                                                   |
+| ----------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| In the same group | Same or lower | Waits until the holding task is done                                                                                           |
+| In the same group | Higher        | Waits until the holding task is done. Meanwhile, the holding task runs in its place with the pending task's priority and turns |
+| Outside the group | Higher        | Interrupts the holding task                                                                                                    |
+| Outside the group | Same          | Takes turns with the holding task at each `yield`                                                                              |
+| Outside the group | Lower         | Runs after the holding task is done                                                                                            |
+
+So group members never take turns with each other, even if a pending member has a higher priority. While the holding task runs in place of a member and waits for a Promise, tasks with a lower priority than that member do not run, except for tasks that this Promise queued.
 
 To use concurrency groups, specify the `group` property in the task builder:
 
