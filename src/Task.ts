@@ -97,6 +97,7 @@ export interface TaskBuilder<
 	 * Yielded Promises should not spawn new tasks. If they do, the spawned tasks MUST be able to run while this task waits.
 	 * So they need a higher priority than this task, and they must not wait for a concurrency group that this task or a task with a lower priority holds.
 	 * When a spawned task waits for a task that cannot run during the wait, the spawned task is rejected and this task fails.
+	 * This check only sees tasks that the factory queues before it returns. Tasks queued after an `await` in the factory are not checked.
 	 * A `Forbidden` or `Restart` task MUST NOT yield such a Promise. A `Forbidden` task keeps the spawned task from running,
 	 * and a `Restart` task is restarted every time the spawned task runs.
 	 *
