@@ -57,9 +57,16 @@ export interface Task<
 }
 
 function getTaskName(task: Task<unknown>): string {
-	return `${
-		task.name ?? (task.tag && JSON.stringify(task.tag)) ?? "unnamed"
-	} (ID ${task.id})`;
+	let name = task.name;
+	if (name == undefined && task.tag) {
+		// The tag may contain values JSON cannot serialize, like a BigInt
+		try {
+			name = JSON.stringify(task.tag);
+		} catch {
+			name = task.tag.id;
+		}
+	}
+	return `${name ?? "unnamed"} (ID ${task.id})`;
 }
 
 /** Defines the necessary information for creating a task */
@@ -124,16 +131,24 @@ function isSameOrParentOf<TaskTag extends { id: string }>(
 	return false;
 }
 
+/** Returns whether one of the tasks is the other one or waits for it, directly or through other tasks */
+function inSameChain<TaskTag extends { id: string }>(
+	a: Task<unknown, TaskTag>,
+	b: Task<unknown, TaskTag>,
+): boolean {
+	return isSameOrParentOf(a, b) || isSameOrParentOf(b, a);
+}
+
 /**
  * Returns whether the started `Restart` or `Forbidden` task `holder` holds `task` back.
  * A `Forbidden` task holds back all other tasks. A `Restart` task holds back the tasks with its priority.
- * Neither holds back itself or its subtasks.
+ * Neither holds back a task in its own chain.
  */
 function holdsBack<TaskTag extends { id: string }>(
 	holder: Task<unknown, TaskTag>,
 	task: Task<unknown, TaskTag>,
 ): boolean {
-	if (isSameOrParentOf(holder, task)) return false;
+	if (inSameChain(holder, task)) return false;
 	return (
 		holder.interrupt === TaskInterruptBehavior.Forbidden ||
 		holder.priority === task.priority
@@ -443,7 +458,7 @@ export class TaskScheduler<
 	/**
 	 * Returns the started task in another chain that holds the concurrency group of `task`, if any.
 	 * A started task holds its group until it is done, also while it waits for a subtask.
-	 * `task` may also be a subtask that is not queued yet. Then the leaf of its chain is its parent.
+	 * `task` may also be a subtask that is not queued yet, or a task that waits for a subtask.
 	 */
 	private findGroupHolder(
 		task: Task<unknown, TaskTag>,
@@ -451,7 +466,7 @@ export class TaskScheduler<
 		const groupId = task.group?.id;
 		if (!groupId) return;
 		for (const leaf of this.leafTasks()) {
-			if (isSameOrParentOf(leaf, task)) continue;
+			if (inSameChain(leaf, task)) continue;
 			for (const t of selfAndParents(leaf)) {
 				if (t.state !== TaskState.None && t.group?.id === groupId) {
 					return t;
@@ -490,7 +505,7 @@ export class TaskScheduler<
 	}
 
 	/**
-	 * Returns the reasons why `subtask` would wait forever, if it waits for a task that waits for the parent of `subtask`, directly or through other tasks.
+	 * Returns the reasons why `subtask` would wait forever, if a chain of waits leads from it back to its parent.
 	 * Call this before queueing `subtask`, while its parent is still the leaf of its chain.
 	 *
 	 * Example: Forbidden task F spawns subtask S in group G. Task A holds G, and F holds A back.
@@ -504,12 +519,16 @@ export class TaskScheduler<
 		const visit = (task: Task<unknown, TaskTag>): string[] | undefined => {
 			for (const [blocker, reason] of this.findBlockers(task)) {
 				if (isSameOrParentOf(blocker, parent)) return [reason];
-				// The blocker waits for the leaf of its chain to finish first
+				if (visited.has(blocker)) continue;
+				visited.add(blocker);
+				// The blocker is done only after the leaf of its chain and each task up to the blocker ran
 				const leaf = this.findLeafTask(blocker);
-				if (!leaf || visited.has(leaf)) continue;
-				visited.add(leaf);
-				const reasons = visit(leaf);
-				if (reasons) return [reason, ...reasons];
+				if (!leaf) continue;
+				for (const t of selfAndParents(leaf)) {
+					const reasons = visit(t);
+					if (reasons) return [reason, ...reasons];
+					if (t === blocker) break;
+				}
 			}
 		};
 		return visit(subtask);

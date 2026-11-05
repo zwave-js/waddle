@@ -2290,6 +2290,84 @@ test("A Forbidden task keeps other tasks from running while its subtask runs", a
 	await scheduler.stop();
 });
 
+test("A Restart task that spawns a subtask in the group of a task it holds back receives an error, also while that task waits for a subtask with a higher priority", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const groups: TaskConcurrencyGroup[] = [{ id: "group1" }, { id: "group2" }];
+
+	// Task 1 has a low priority, holds group 2 and waits
+	const gate1 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		name: "task 1",
+		priority: TaskPriority.Low,
+		group: groups[1],
+		task: async function* () {
+			order.push("1a");
+			yield () => gate1;
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	// Task 2 holds group 1 and waits for subtask 3, which has a higher priority and waits for group 2
+	const task2 = scheduler.queueTask({
+		name: "task 2",
+		priority: TaskPriority.Normal,
+		group: groups[0],
+		task: async function* () {
+			order.push("2a");
+			yield {
+				name: "task 3",
+				priority: TaskPriority.High,
+				group: groups[1],
+				task: async function* () {
+					order.push("3a");
+				},
+			};
+			order.push("2b");
+		},
+	});
+	await wait(1);
+
+	// Task 4 holds back task 2, which must resume after subtask 3. So subtask 5 in the group of task 2 would wait forever.
+	let error: unknown;
+	const task4 = scheduler.queueTask({
+		name: "task 4",
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* () {
+			order.push("4a");
+			try {
+				yield {
+					name: "task 5",
+					priority: TaskPriority.Normal,
+					group: groups[0],
+					task: async function* () {
+						order.push("5a");
+					},
+				};
+			} catch (e) {
+				error = e;
+			}
+			order.push("4b");
+		},
+	});
+	await task4;
+	t.expect(order).toStrictEqual(["1a", "2a", "4a", "4b"]);
+	t.expect((error as Error).message).toMatch(
+		/^Subtask task 5 \(ID \d+\) would wait forever\. .*"group1", which task 2 \(ID \d+\) holds\. task 2 \(ID \d+\) is held back by task 4 \(ID \d+\)\.$/,
+	);
+
+	// Once task 4 is done, the other tasks finish in order
+	gate1.resolve();
+	await Promise.all([task1, task2]);
+	t.expect(order).toStrictEqual(["1a", "2a", "4a", "4b", "1b", "3a", "2b"]);
+
+	await scheduler.stop();
+});
+
 test("A Forbidden task that spawns a subtask in the group of a task it holds back receives an error at its yield", async (t) => {
 	const scheduler = new TaskScheduler();
 	scheduler.start();
