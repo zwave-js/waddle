@@ -94,6 +94,8 @@ export interface TaskBuilder<
 	 * - Or another task, in which case it must yield a TaskBuilder object or a function that returns one
 	 *
 	 * Yielded Promises should not spawn new tasks. If they do, the spawned tasks MUST have a higher priority than the parent task.
+	 * They also MUST NOT wait for a concurrency group that the parent task or a task with a lower priority holds.
+	 * Such a task could not run during the wait, so `queueTask` throws and the parent task fails.
 	 * A `Forbidden` or `Restart` task MUST NOT yield such a Promise. A `Forbidden` task keeps the spawned task from running,
 	 * and a `Restart` task is restarted every time the spawned task runs.
 	 *
@@ -139,16 +141,14 @@ function inSameChain<TaskTag extends { id: string }>(
 	return isSameOrParentOf(a, b) || isSameOrParentOf(b, a);
 }
 
-/**
- * Returns whether the started `Restart` or `Forbidden` task `holder` holds `task` back.
- * A `Forbidden` task holds back all other tasks. A `Restart` task holds back the tasks with its priority.
- * Neither holds back a task in its own chain.
- */
+/** Returns whether the started `Restart` or `Forbidden` task `holder` holds `task` back */
 function holdsBack<TaskTag extends { id: string }>(
 	holder: Task<unknown, TaskTag>,
 	task: Task<unknown, TaskTag>,
 ): boolean {
+	// A task never holds back a task it waits for, or a task that waits for it
 	if (inSameChain(holder, task)) return false;
+	// A Forbidden task holds back all other tasks. A Restart task holds back the tasks with its priority.
 	return (
 		holder.interrupt === TaskInterruptBehavior.Forbidden ||
 		holder.priority === task.priority
@@ -272,6 +272,8 @@ export class TaskScheduler<
 	>();
 	/** The started `Restart` and `Forbidden` tasks that hold back other tasks until they are done */
 	private _holders = new Set<Task<unknown, TaskTag>>();
+	/** The task whose yielded promise factory is being called right now */
+	private _spawningTask: Task<unknown, TaskTag> | undefined;
 	/** The order in which the turn owners of tasks with the same priority take their next turn */
 	private _turns = new WeakMap<Task<unknown, TaskTag>, number>();
 	private _turnCounter = 0;
@@ -317,6 +319,9 @@ export class TaskScheduler<
 
 	public queueTask<T>(builder: TaskBuilder<T, TaskTag>): Promise<T> {
 		const task = this.createTask(builder);
+		if (this._spawningTask) {
+			this.assertRunsWhileSpawnerWaits(task, this._spawningTask);
+		}
 		this.assignNextTurn(task);
 		this._tasks.add(task);
 		if (this.verbose) {
@@ -456,9 +461,8 @@ export class TaskScheduler<
 	}
 
 	/**
-	 * Returns the started task in another chain that holds the concurrency group of `task`, if any.
-	 * A started task holds its group until it is done, also while it waits for a subtask.
-	 * `task` may also be a subtask that is not queued yet, or a task that waits for a subtask.
+	 * Returns the started task that holds the concurrency group of `task`, if any.
+	 * Tasks that `task` waits for, and tasks that wait for `task`, do not count.
 	 */
 	private findGroupHolder(
 		task: Task<unknown, TaskTag>,
@@ -466,8 +470,10 @@ export class TaskScheduler<
 		const groupId = task.group?.id;
 		if (!groupId) return;
 		for (const leaf of this.leafTasks()) {
+			// `task` may be a subtask that is not queued yet. Then its parent is queued in its place.
 			if (inSameChain(leaf, task)) continue;
 			for (const t of selfAndParents(leaf)) {
+				// A started task holds its group until it is done, also while it waits for a subtask
 				if (t.state !== TaskState.None && t.group?.id === groupId) {
 					return t;
 				}
@@ -483,6 +489,27 @@ export class TaskScheduler<
 		return false;
 	}
 
+	/**
+	 * Throws when `task` could not run while `spawner` waits for the promise whose factory queued `task`.
+	 * While `spawner` waits, tasks with a lower priority do not run, and neither does the chain of `spawner`.
+	 */
+	private assertRunsWhileSpawnerWaits(
+		task: Task<unknown, TaskTag>,
+		spawner: Task<unknown, TaskTag>,
+	): void {
+		const holder = this.findGroupHolder(task);
+		if (!holder) return;
+		if (
+			holder.priority <= spawner.priority &&
+			!inSameChain(holder, spawner)
+		) {
+			return;
+		}
+		throw new Error(
+			`Cannot queue ${getTaskName(task)} while ${getTaskName(spawner)} waits for a promise: ${getTaskName(holder)} must finish before ${getTaskName(task)} can run, because both are in concurrency group "${task.group!.id}", but ${getTaskName(holder)} does not run before ${getTaskName(spawner)} continues.`,
+		);
+	}
+
 	/** Yields the started tasks that must finish before `task` may run, each with the reason */
 	private *findBlockers(
 		task: Task<unknown, TaskTag>,
@@ -491,16 +518,19 @@ export class TaskScheduler<
 		if (groupHolder) {
 			yield [
 				groupHolder,
-				`${getTaskName(task)} waits for concurrency group "${task.group!.id}", which ${getTaskName(groupHolder)} holds`,
+				`${getTaskName(groupHolder)} must finish before ${getTaskName(task)} can run, because both are in concurrency group "${task.group!.id}"`,
 			];
 		}
 		for (const holder of this._holders) {
-			if (holdsBack(holder, task)) {
-				yield [
-					holder,
-					`${getTaskName(task)} is held back by ${getTaskName(holder)}`,
-				];
-			}
+			if (!holdsBack(holder, task)) continue;
+			const why =
+				holder.interrupt === TaskInterruptBehavior.Forbidden
+					? "it must not be interrupted"
+					: "it starts over when interrupted";
+			yield [
+				holder,
+				`${getTaskName(holder)} must finish before ${getTaskName(task)} can run, because ${why}`,
+			];
 		}
 	}
 
@@ -649,7 +679,14 @@ export class TaskScheduler<
 						result: value,
 					};
 				} else if (value != undefined) {
-					const waitFor = evalOrStatic(value);
+					let waitFor;
+					// Let queueTask check tasks that the promise factory queues
+					self._spawningTask = task;
+					try {
+						waitFor = evalOrStatic(value);
+					} finally {
+						self._spawningTask = undefined;
+					}
 					if (waitFor instanceof Promise) {
 						state = TaskState.AwaitingPromise;
 						// Ignore the promise's result if this task was reset in the meantime
@@ -835,7 +872,7 @@ export class TaskScheduler<
 						// Reject the subtask without queueing it.
 						// The task receives the error at its yield once it steps again.
 						const error = new Error(
-							`Subtask ${getTaskName(subtask)} would wait forever. ${deadlock.join(". ")}.`,
+							`Subtask ${getTaskName(subtask)} would wait forever. ${deadlock.join(". ")}. ${getTaskName(task)} waits for ${getTaskName(subtask)}.`,
 						);
 						if (this.verbose) {
 							console.error(`- ${error.message}`);
