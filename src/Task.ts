@@ -96,7 +96,7 @@ export interface TaskBuilder<
 	 *
 	 * Yielded Promises should not spawn new tasks. If they do, the spawned tasks MUST be able to run while this task waits.
 	 * So they need a higher priority than this task, and they must not wait for a concurrency group that this task or a task with a lower priority holds.
-	 * When a spawned task waits for a task that cannot run during the wait, this task fails.
+	 * When a spawned task waits for a task that cannot run during the wait, the spawned task is rejected and this task fails.
 	 * A `Forbidden` or `Restart` task MUST NOT yield such a Promise. A `Forbidden` task keeps the spawned task from running,
 	 * and a `Restart` task is restarted every time the spawned task runs.
 	 *
@@ -492,13 +492,13 @@ export class TaskScheduler<
 	}
 
 	/**
-	 * Throws when `task` cannot run while `spawner` waits for the promise whose factory queued `task`.
+	 * Returns an error when `task` cannot run while `spawner` waits for the promise whose factory queued `task`.
 	 * While `spawner` waits, tasks with a lower priority do not run, and neither do the tasks that wait for `spawner`.
 	 */
-	private assertRunsWhileSpawnerWaits(
+	private checkRunsWhileSpawnerWaits(
 		task: Task<unknown, TaskTag>,
 		spawner: Task<unknown, TaskTag>,
-	): void {
+	): Error | undefined {
 		const reasons = this.findWaitFor(task, (blocker) => {
 			if (
 				blocker.priority <= spawner.priority &&
@@ -509,8 +509,8 @@ export class TaskScheduler<
 			return `${getTaskName(blocker)} does not run before ${getTaskName(spawner)} continues`;
 		});
 		if (!reasons) return;
-		throw new Error(
-			`${getTaskName(task)} cannot run while ${getTaskName(spawner)} waits for a promise. ${reasons.join(". ")}.`,
+		return new Error(
+			`Cannot queue ${getTaskName(task)} while ${getTaskName(spawner)} waits for a promise. ${reasons.join(". ")}.`,
 		);
 	}
 
@@ -709,7 +709,17 @@ export class TaskScheduler<
 					}
 					if (waitFor instanceof Promise) {
 						for (const spawnedTask of spawned) {
-							self.assertRunsWhileSpawnerWaits(spawnedTask, task);
+							const error = self.checkRunsWhileSpawnerWaits(
+								spawnedTask,
+								task,
+							);
+							if (!error) continue;
+							// Remove the task again and fail this task instead.
+							// The promise may wait for the removed task, so its rejection is expected.
+							self._tasks.remove(spawnedTask);
+							spawnedTask.reject(error as TError);
+							waitFor.catch(noop);
+							throw error;
 						}
 						state = TaskState.AwaitingPromise;
 						// Ignore the promise's result if this task was reset in the meantime

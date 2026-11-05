@@ -376,7 +376,7 @@ So group members never take turns with each other, even if a pending member has 
 
 A `Forbidden` or `Restart` task must not spawn a subtask in a group that is held by a task it holds back. Two tasks must also not each spawn a subtask in the group the other one holds. In both cases the subtask would wait forever. The scheduler then does not queue the subtask and throws an error into the parent task at its `yield`.
 
-Likewise, a task that waits for a Promise must not queue a task from that Promise into a group whose holder cannot finish during the wait. This is the case when the holder has a lower priority than the waiting task, when it is the waiting task itself, or when it waits for such a task. The queued task could not run during the wait, so the waiting task fails. Mixing priorities within a concurrency group is best avoided altogether.
+Likewise, a task that waits for a Promise must not queue a task from that Promise into a group whose holder cannot finish during the wait. This is the case when the holder has a lower priority than the waiting task, when it is the waiting task itself, or when it waits for such a task. The queued task could not run during the wait, so it is rejected and the waiting task fails. Mixing priorities within a concurrency group is best avoided altogether.
 
 To use concurrency groups, specify the `group` property in the task builder:
 

@@ -1044,14 +1044,16 @@ test("A task fails when its yielded promise queues a task into a group held by a
 	await t
 		.expect(() => task2)
 		.rejects.toThrowError(
-			/^task 3 \(ID \d+\) cannot run while task 2 \(ID \d+\) waits for a promise\. task 1 \(ID \d+\) must finish before task 3 \(ID \d+\) can run, because both are in concurrency group "group"\. task 1 \(ID \d+\) does not run before task 2 \(ID \d+\) continues\.$/,
+			/^Cannot queue task 3 \(ID \d+\) while task 2 \(ID \d+\) waits for a promise\. task 1 \(ID \d+\) must finish before task 3 \(ID \d+\) can run, because both are in concurrency group "group"\. task 1 \(ID \d+\) does not run before task 2 \(ID \d+\) continues\.$/,
 		);
 	t.expect(order).toStrictEqual(["1a", "2a"]);
 
-	// Task 3 stays queued and runs once task 1 is done
+	// Task 3 is rejected with the same error
+	await t.expect(() => task3!).rejects.toThrowError(/^Cannot queue task 3 /);
+
 	gate1.resolve();
-	await Promise.all([task1, task3]);
-	t.expect(order).toStrictEqual(["1a", "2a", "1b", "3a"]);
+	await task1;
+	t.expect(order).toStrictEqual(["1a", "2a", "1b"]);
 
 	await scheduler.stop();
 });
@@ -1080,7 +1082,7 @@ test("A task fails when its yielded promise queues a task into its own group", a
 	await t
 		.expect(() => task1)
 		.rejects.toThrowError(
-			/^task 2 \(ID \d+\) cannot run while task 1 \(ID \d+\) waits for a promise\. task 1 \(ID \d+\) must finish before task 2/,
+			/^Cannot queue task 2 \(ID \d+\) while task 1 \(ID \d+\) waits for a promise\. task 1 \(ID \d+\) must finish before task 2/,
 		);
 
 	await scheduler.stop();
@@ -1153,13 +1155,15 @@ test("A task fails when its yielded promise queues a task into a group whose hol
 	await t
 		.expect(() => task4)
 		.rejects.toThrowError(
-			/^task 5 \(ID \d+\) cannot run while task 4 \(ID \d+\) waits for a promise\. task 2 \(ID \d+\) must finish before task 5 \(ID \d+\) can run, because both are in concurrency group "group1"\. task 1 \(ID \d+\) must finish before task 3 \(ID \d+\) can run, because both are in concurrency group "group2"\. task 1 \(ID \d+\) does not run before task 4 \(ID \d+\) continues\.$/,
+			/^Cannot queue task 5 \(ID \d+\) while task 4 \(ID \d+\) waits for a promise\. task 2 \(ID \d+\) must finish before task 5 \(ID \d+\) can run, because both are in concurrency group "group1"\. task 1 \(ID \d+\) must finish before task 3 \(ID \d+\) can run, because both are in concurrency group "group2"\. task 1 \(ID \d+\) does not run before task 4 \(ID \d+\) continues\.$/,
 		);
 	t.expect(order).toStrictEqual(["1a", "2a", "4a"]);
 
+	await t.expect(() => task5!).rejects.toThrowError(/^Cannot queue task 5 /);
+
 	gate1.resolve();
-	await Promise.all([task1, task2, task5]);
-	t.expect(order).toStrictEqual(["1a", "2a", "4a", "1b", "3a", "2b", "5a"]);
+	await Promise.all([task1, task2]);
+	t.expect(order).toStrictEqual(["1a", "2a", "4a", "1b", "3a", "2b"]);
 
 	await scheduler.stop();
 });
