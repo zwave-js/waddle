@@ -518,6 +518,14 @@ const scheduler = new TaskScheduler(() => new Error("We are all doomed!"));
 ```
 
 ## Changelog
+<!--
+	Placeholder for next release:
+	### __WORK IN PROGRESS__
+-->
+### __WORK IN PROGRESS__
+
+- Fixed: Task scheduling now follows the README's rules for priorities, interrupt behaviors and concurrency groups, and it throws an error into the parent task when a subtask would cause a deadlock
+
 ### 1.3.1 (2026-10-06)
 
 - Fixed: `removeTasks` and `findTasks` now also consider parent tasks that are waiting for a subtask
