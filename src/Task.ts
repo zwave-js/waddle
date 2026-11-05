@@ -1,4 +1,7 @@
-import type { CompareResult } from "alcalzone-shared/comparable";
+import {
+	type CompareResult,
+	compareNumberOrString,
+} from "alcalzone-shared/comparable";
 import {
 	type DeferredPromise,
 	createDeferredPromise,
@@ -235,12 +238,8 @@ export class TaskScheduler<
 		Task<unknown, TaskTag>,
 		Promise<unknown>
 	>();
-	/** The task in each concurrency group that has started and not finished yet */
-	private _groupHolders = new Map<string, Task<unknown, TaskTag>>();
-	/** The started `Restart` task that keeps each priority to itself until it is done */
-	private _priorityHolders = new Map<TaskPriority, Task<unknown, TaskTag>>();
-	/** The started `Forbidden` task that keeps all other tasks from running until it is done */
-	private _forbiddenHolder: Task<unknown, TaskTag> | undefined;
+	/** The started `Restart` and `Forbidden` tasks that hold back other tasks until they are done */
+	private _holders = new Set<Task<unknown, TaskTag>>();
 	/** The task whose yielded promise factory queued each task */
 	private _spawners = new WeakMap<
 		Task<unknown, TaskTag>,
@@ -266,14 +265,14 @@ export class TaskScheduler<
 		a: Task<unknown, TaskTag>,
 		b: Task<unknown, TaskTag>,
 	): CompareResult {
-		if (a.priority < b.priority) return 1;
-		if (a.priority > b.priority) return -1;
-
-		const aTurn = this._turns.get(getTurnOwner(a))!;
-		const bTurn = this._turns.get(getTurnOwner(b))!;
-		if (aTurn !== bTurn) return Math.sign(bTurn - aTurn) as CompareResult;
-
-		return Math.sign(b.id - a.id) as CompareResult;
+		return (
+			compareNumberOrString(a.priority, b.priority) ||
+			compareNumberOrString(
+				this._turns.get(getTurnOwner(a))!,
+				this._turns.get(getTurnOwner(b))!,
+			) ||
+			compareNumberOrString(a.id, b.id)
+		);
 	}
 
 	/**
@@ -286,8 +285,6 @@ export class TaskScheduler<
 
 	/** Moves a queued task behind the other queued tasks with its priority, so tasks with the same priority take turns */
 	private endTurn(task: Task<unknown, TaskTag>): void {
-		// A group member may have been removed while another task ran in its place
-		if (!this._tasks.contains(task)) return;
 		this._tasks.remove(task);
 		this.assignNextTurn(task);
 		this._tasks.add(task);
@@ -354,17 +351,18 @@ export class TaskScheduler<
 		return tasksToRemove.size > 0;
 	}
 
+	/** Yields the current task and the queued tasks. Each is the end of a chain of parents waiting for it. */
+	private *leafTasks(): Generator<Task<unknown, TaskTag>> {
+		if (this._currentTask) yield this._currentTask;
+		yield* this._tasks;
+	}
+
 	/** Returns the queued or current task that is `task` itself or one of its subtasks, if any */
 	private findLeafTask(
 		task: Task<unknown, TaskTag>,
 	): Task<unknown, TaskTag> | undefined {
-		const leaves = this._currentTask
-			? [this._currentTask, ...this._tasks]
-			: this._tasks;
-		for (const leaf of leaves) {
-			for (const t of selfAndParents(leaf)) {
-				if (t === task) return leaf;
-			}
+		for (const leaf of this.leafTasks()) {
+			if (isSameOrParentOf(task, leaf)) return leaf;
 		}
 	}
 
@@ -409,19 +407,10 @@ export class TaskScheduler<
 		this._tasks.add(parent);
 	}
 
-	/** Forgets the promise a task waits for, and releases its concurrency group, priority and `Forbidden` holds */
+	/** Forgets the promise a task waits for and releases its `Restart` or `Forbidden` hold */
 	private releaseHolds(task: Task<unknown, TaskTag>): void {
 		this._awaitedPromises.delete(task);
-		const groupId = task.group?.id;
-		if (groupId && this._groupHolders.get(groupId) === task) {
-			this._groupHolders.delete(groupId);
-		}
-		if (this._priorityHolders.get(task.priority) === task) {
-			this._priorityHolders.delete(task.priority);
-		}
-		if (this._forbiddenHolder === task) {
-			this._forbiddenHolder = undefined;
-		}
+		this._holders.delete(task);
 	}
 
 	/**
@@ -432,7 +421,6 @@ export class TaskScheduler<
 		task: Task<unknown, TaskTag>,
 		promise: Promise<unknown>,
 	): void {
-		if (this._awaitedPromises.get(task) === promise) return;
 		this._awaitedPromises.set(task, promise);
 		const settled = () => {
 			// Ignore the promise if the task was reset or removed in the meantime
@@ -443,14 +431,23 @@ export class TaskScheduler<
 		promise.then(settled, settled);
 	}
 
-	/** Returns whether another task holds the concurrency group of the given task */
-	private isBlockedByGroup(task: Task<unknown, TaskTag>): boolean {
+	/**
+	 * Returns the leaf of the chain that holds the concurrency group of `task`, if another chain holds it.
+	 * A started task holds its group until it is done, also while it waits for a subtask.
+	 */
+	private findGroupHolderLeaf(
+		task: Task<unknown, TaskTag>,
+	): Task<unknown, TaskTag> | undefined {
 		const groupId = task.group?.id;
-		if (!groupId) return false;
-		const holder = this._groupHolders.get(groupId);
-		if (!holder) return false;
-		// A group held by one of its parents counts as held by the task itself
-		return !isSameOrParentOf(holder, task);
+		if (!groupId) return;
+		for (const leaf of this.leafTasks()) {
+			if (leaf === task) continue;
+			for (const t of selfAndParents(leaf)) {
+				if (t.state !== TaskState.None && t.group?.id === groupId) {
+					return leaf;
+				}
+			}
+		}
 	}
 
 	/**
@@ -458,11 +455,14 @@ export class TaskScheduler<
 	 * A `Forbidden` task holds back all other tasks. A `Restart` task holds back the tasks with its priority.
 	 */
 	private isHeldBack(task: Task<unknown, TaskTag>): boolean {
-		for (const holder of [
-			this._forbiddenHolder,
-			this._priorityHolders.get(task.priority),
-		]) {
-			if (holder && !isSameOrParentOf(holder, task)) return true;
+		for (const holder of this._holders) {
+			if (isSameOrParentOf(holder, task)) continue;
+			if (
+				holder.interrupt === TaskInterruptBehavior.Forbidden ||
+				holder.priority === task.priority
+			) {
+				return true;
+			}
 		}
 		return false;
 	}
@@ -474,21 +474,20 @@ export class TaskScheduler<
 	 * Example: Candidate A waits for group G. Task B holds G and waits for its subtask C. C waits for group H, which task D holds.
 	 * Then D must run first, so this returns D.
 	 *
-	 * Returns `undefined` when the tasks wait for each other's groups, or when a group holder has no queued task.
+	 * Returns `undefined` when the tasks wait for each other's groups.
 	 */
 	private findTaskToRun(
 		candidate: Task<unknown, TaskTag>,
 	): Task<unknown, TaskTag> | undefined {
 		const visited = new Set<Task<unknown, TaskTag>>();
-		let taskToRun: Task<unknown, TaskTag> | undefined = candidate;
-		while (taskToRun && this.isBlockedByGroup(taskToRun)) {
-			if (visited.has(taskToRun)) return;
-			visited.add(taskToRun);
-			taskToRun = this.findLeafTask(
-				this._groupHolders.get(taskToRun.group!.id)!,
-			);
+		let taskToRun = candidate;
+		while (true) {
+			const holderLeaf = this.findGroupHolderLeaf(taskToRun);
+			if (!holderLeaf) return taskToRun;
+			if (visited.has(holderLeaf)) return;
+			visited.add(holderLeaf);
+			taskToRun = holderLeaf;
 		}
-		return taskToRun;
 	}
 
 	/** Returns whether the promise factory of one of `spawners` queued `task` or one of its parents */
@@ -756,8 +755,7 @@ export class TaskScheduler<
 					this._currentTask !== task &&
 					this._currentTask.interrupt ===
 						TaskInterruptBehavior.Restart &&
-					candidate.priority <
-						(this._currentPriority ?? this._currentTask.priority)
+					candidate.priority < this._currentPriority!
 				) {
 					// The current task needs to be restarted after being interrupted, so reset it
 					const interrupted = this._currentTask;
@@ -781,27 +779,14 @@ export class TaskScheduler<
 					console.log(`Stepping through task: ${getTaskName(task)}`);
 				}
 
-				const groupId = task.group?.id;
-				if (groupId && !this._groupHolders.has(groupId)) {
-					this._groupHolders.set(groupId, task);
-				}
-				// A started Restart task keeps its priority to itself until it is done.
-				// A started Forbidden task keeps all other tasks from running until it is done.
-				// A task that runs in place of a group member must not hold back that member, so it takes neither hold.
+				// A started Restart or Forbidden task holds back other tasks until it is done.
+				// A task that runs in place of a group member takes no hold, so it does not hold back that member.
 				const runsInPlace = candidate !== task;
 				if (
 					!runsInPlace &&
-					task.interrupt === TaskInterruptBehavior.Restart &&
-					!this._priorityHolders.has(task.priority)
+					task.interrupt !== TaskInterruptBehavior.Resume
 				) {
-					this._priorityHolders.set(task.priority, task);
-				}
-				if (
-					!runsInPlace &&
-					task.interrupt === TaskInterruptBehavior.Forbidden &&
-					!this._forbiddenHolder
-				) {
-					this._forbiddenHolder = task;
+					this._holders.add(task);
 				}
 
 				const finalizeCurrentTask = async () => {
@@ -843,17 +828,7 @@ export class TaskScheduler<
 					await finalizeCurrentTask();
 					// Then continue with the next iteration
 					continue;
-				} else if (stepResult.newState === TaskState.AwaitingPromise) {
-					// The task is waiting for something
-					if (this.verbose) {
-						console.log(`- Task waiting`);
-					}
-
-					// Skip the task until its promise settles, so other tasks can run in the meantime
-					this.trackWaitingTask(task, stepResult.promise);
-					this.endTurn(task);
-					// A task that runs in place of a group member uses up that member's turn
-					if (runsInPlace) this.endTurn(candidate);
+				} else if (stepResult.newState === TaskState.None) {
 					continue;
 				} else if (stepResult.newState === TaskState.AwaitingTask) {
 					// The task spawned a sub-task. Replace it with the sub-task and continue executing
@@ -865,19 +840,25 @@ export class TaskScheduler<
 					// A subtask with a higher priority gets its own turn
 					this.assignNextTurn(stepResult.task);
 					this._tasks.add(stepResult.task);
-					if (runsInPlace) this.endTurn(candidate);
 					// Switching to the subtask must not count as interrupting the parent
 					this._currentTask = undefined;
-					// Continue with the next iteration
-					continue;
-				} else if (stepResult.newState === TaskState.Active) {
-					this.endTurn(task);
-					if (runsInPlace) this.endTurn(candidate);
-					continue;
 				} else {
-					// The step result is stale after a removal. Continue with the next iteration.
-					continue;
+					if (stepResult.newState === TaskState.AwaitingPromise) {
+						// The task is waiting for something
+						if (this.verbose) {
+							console.log(`- Task waiting`);
+						}
+						// Skip the task until its promise settles, so other tasks can run in the meantime
+						this.trackWaitingTask(task, stepResult.promise);
+					}
+					this.endTurn(task);
 				}
+				// A task that runs in place of a group member uses up that member's turn.
+				// The member may have been removed in the meantime.
+				if (runsInPlace && this._tasks.contains(candidate)) {
+					this.endTurn(candidate);
+				}
+				continue;
 			}
 
 			// No task may run right now. Wait for a new task, a settled promise or the stop signal
