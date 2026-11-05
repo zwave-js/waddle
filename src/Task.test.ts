@@ -1044,14 +1044,14 @@ test("A task fails when its yielded promise queues a task into a group held by a
 	await t
 		.expect(() => task2)
 		.rejects.toThrowError(
-			/^Cannot queue task 3 \(ID \d+\) while task 2 \(ID \d+\) waits for a promise: task 1 \(ID \d+\) must finish before task 3 \(ID \d+\) can run, because both are in concurrency group "group", but task 1 \(ID \d+\) does not run before task 2 \(ID \d+\) continues\.$/,
+			/^task 3 \(ID \d+\) cannot run while task 2 \(ID \d+\) waits for a promise\. task 1 \(ID \d+\) must finish before task 3 \(ID \d+\) can run, because both are in concurrency group "group"\. task 1 \(ID \d+\) does not run before task 2 \(ID \d+\) continues\.$/,
 		);
-	t.expect(task3).toBeUndefined();
 	t.expect(order).toStrictEqual(["1a", "2a"]);
 
+	// Task 3 stays queued and runs once task 1 is done
 	gate1.resolve();
-	await task1;
-	t.expect(order).toStrictEqual(["1a", "2a", "1b"]);
+	await Promise.all([task1, task3]);
+	t.expect(order).toStrictEqual(["1a", "2a", "1b", "3a"]);
 
 	await scheduler.stop();
 });
@@ -1080,8 +1080,130 @@ test("A task fails when its yielded promise queues a task into its own group", a
 	await t
 		.expect(() => task1)
 		.rejects.toThrowError(
-			/^Cannot queue task 2 \(ID \d+\) while task 1 \(ID \d+\) waits for a promise: task 1 \(ID \d+\) must finish before task 2/,
+			/^task 2 \(ID \d+\) cannot run while task 1 \(ID \d+\) waits for a promise\. task 1 \(ID \d+\) must finish before task 2/,
 		);
+
+	await scheduler.stop();
+});
+
+test("A task fails when its yielded promise queues a task into a group whose holder waits for a task with a lower priority", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group1: TaskConcurrencyGroup = { id: "group1" };
+	const group2: TaskConcurrencyGroup = { id: "group2" };
+
+	// Task 1 has a low priority, holds group 2 and waits
+	const gate1 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		name: "task 1",
+		priority: TaskPriority.Low,
+		group: group2,
+		task: async function* () {
+			order.push("1a");
+			yield () => gate1;
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	// Task 2 has a high priority, holds group 1 and waits for subtask 3 in group 2
+	const task2 = scheduler.queueTask({
+		name: "task 2",
+		priority: TaskPriority.High,
+		group: group1,
+		task: async function* () {
+			order.push("2a");
+			yield {
+				name: "task 3",
+				priority: TaskPriority.High,
+				group: group2,
+				task: async function* () {
+					order.push("3a");
+				},
+			};
+			order.push("2b");
+		},
+	});
+	await wait(1);
+
+	// Task 4 yields a promise that queues task 5 in group 1.
+	// Task 2 waits for task 3, which waits for task 1. Task 1 does not run while task 4 waits.
+	let task5: Promise<void> | undefined;
+	const task4 = scheduler.queueTask({
+		name: "task 4",
+		priority: TaskPriority.Normal,
+		task: async function* () {
+			order.push("4a");
+			yield () => {
+				task5 = scheduler.queueTask({
+					name: "task 5",
+					priority: TaskPriority.Highest,
+					group: group1,
+					task: async function* () {
+						order.push("5a");
+					},
+				});
+				return task5;
+			};
+			order.push("4b");
+		},
+	});
+	await t
+		.expect(() => task4)
+		.rejects.toThrowError(
+			/^task 5 \(ID \d+\) cannot run while task 4 \(ID \d+\) waits for a promise\. task 2 \(ID \d+\) must finish before task 5 \(ID \d+\) can run, because both are in concurrency group "group1"\. task 1 \(ID \d+\) must finish before task 3 \(ID \d+\) can run, because both are in concurrency group "group2"\. task 1 \(ID \d+\) does not run before task 4 \(ID \d+\) continues\.$/,
+		);
+	t.expect(order).toStrictEqual(["1a", "2a", "4a"]);
+
+	gate1.resolve();
+	await Promise.all([task1, task2, task5]);
+	t.expect(order).toStrictEqual(["1a", "2a", "4a", "1b", "3a", "2b", "5a"]);
+
+	await scheduler.stop();
+});
+
+test("A yielded factory that returns a TaskBuilder may queue a task into the group of the yielding task", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "group" };
+
+	// Task 1 holds the group. Its factory queues task 2 in the group and returns subtask 3.
+	let task2: Promise<void> | undefined;
+	const task1 = scheduler.queueTask({
+		name: "task 1",
+		priority: TaskPriority.Normal,
+		group,
+		task: async function* () {
+			order.push("1a");
+			yield () => {
+				task2 = scheduler.queueTask({
+					name: "task 2",
+					priority: TaskPriority.High,
+					group,
+					task: async function* () {
+						order.push("2a");
+					},
+				});
+				return {
+					name: "task 3",
+					priority: TaskPriority.High,
+					task: async function* () {
+						order.push("3a");
+					},
+				};
+			};
+			order.push("1b");
+		},
+	});
+
+	// Task 2 runs once task 1 is done
+	await task1;
+	await task2;
+	t.expect(order).toStrictEqual(["1a", "3a", "1b", "2a"]);
 
 	await scheduler.stop();
 });
@@ -2452,6 +2574,104 @@ test("A Restart task that spawns a subtask in the group of a task it holds back 
 	gate1.resolve();
 	await Promise.all([task1, task2]);
 	t.expect(order).toStrictEqual(["1a", "2a", "4a", "4b", "1b", "3a", "2b"]);
+
+	await scheduler.stop();
+});
+
+test("A Restart task that spawns a subtask in the group of a task it holds back receives an error, also while a subtask in the same group holds the group", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group1: TaskConcurrencyGroup = { id: "group1" };
+	const group2: TaskConcurrencyGroup = { id: "group2" };
+
+	// Task 1 has a low priority, holds group 2 and waits
+	const gate1 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		name: "task 1",
+		priority: TaskPriority.Low,
+		group: group2,
+		task: async function* () {
+			order.push("1a");
+			yield () => gate1;
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	// Task 2 holds group 1 and waits for subtask 3, which is in group 1 too and waits for subtask 4 in group 2
+	const task2 = scheduler.queueTask({
+		name: "task 2",
+		priority: TaskPriority.Normal,
+		group: group1,
+		task: async function* () {
+			order.push("2a");
+			yield {
+				name: "task 3",
+				priority: TaskPriority.High,
+				group: group1,
+				task: async function* () {
+					order.push("3a");
+					yield {
+						name: "task 4",
+						priority: TaskPriority.High,
+						group: group2,
+						task: async function* () {
+							order.push("4a");
+						},
+					};
+					order.push("3b");
+				},
+			};
+			order.push("2b");
+		},
+	});
+	await wait(1);
+
+	// Task 5 holds back task 2, which must resume after subtask 3. So subtask 6 in group 1 would wait forever.
+	let error: unknown;
+	const task5 = scheduler.queueTask({
+		name: "task 5",
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* () {
+			order.push("5a");
+			try {
+				yield {
+					name: "task 6",
+					priority: TaskPriority.Normal,
+					group: group1,
+					task: async function* () {
+						order.push("6a");
+					},
+				};
+			} catch (e) {
+				error = e;
+			}
+			order.push("5b");
+		},
+	});
+	await task5;
+	t.expect(order).toStrictEqual(["1a", "2a", "3a", "5a", "5b"]);
+	t.expect((error as Error).message).toMatch(
+		/^Subtask task 6 \(ID \d+\) would wait forever\. task 2 \(ID \d+\) must finish before task 6 \(ID \d+\) can run, because both are in concurrency group "group1"\. task 5 \(ID \d+\) must finish before task 2 \(ID \d+\) can run, because it starts over when interrupted\. task 5 \(ID \d+\) waits for task 6 \(ID \d+\)\.$/,
+	);
+
+	// Once task 5 is done, the other tasks finish in order
+	gate1.resolve();
+	await Promise.all([task1, task2]);
+	t.expect(order).toStrictEqual([
+		"1a",
+		"2a",
+		"3a",
+		"5a",
+		"5b",
+		"1b",
+		"4a",
+		"3b",
+		"2b",
+	]);
 
 	await scheduler.stop();
 });
