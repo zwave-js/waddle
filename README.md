@@ -187,7 +187,6 @@ A task is interrupted when a task with a higher priority runs before it is done.
 | `Forbidden`        | The task keeps running until it is done                  | Run after the task is done, also while it waits for a Promise or a subtask |
 
 So towards tasks with the same priority, a started `Restart` task behaves like a `Forbidden` task.
-A task that holds a [concurrency group](#task-concurrency-groups) may still run while a started `Restart` or `Forbidden` task holds it back, if a subtask of that task waits for the group. While it runs in place of that subtask, it does not hold back other tasks itself.
 
 #### Waiting while yielding
 
@@ -365,15 +364,19 @@ This task will yield to the scheduler at each `yield` point in the `task1` and `
 
 By default, tasks with the same priority take turns at each `yield`. In some situations it may be desirable for a task to finish before another related task is allowed to run. Concurrency groups can be used to achieve this. A started task holds its group until it is done. This is how other pending tasks behave, compared to the priority of the task that holds the group:
 
-| Pending task      | Priority      | What happens                                                                                                                   |
-| ----------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| In the same group | Same or lower | Waits until the holding task is done                                                                                           |
-| In the same group | Higher        | Waits until the holding task is done. Meanwhile, the holding task runs in its place with the pending task's priority and turns |
-| Outside the group | Higher        | Interrupts the holding task                                                                                                    |
-| Outside the group | Same          | Takes turns with the holding task at each `yield`                                                                              |
-| Outside the group | Lower         | Runs after the holding task is done                                                                                            |
+| Pending task      | Priority      | What happens                                      |
+| ----------------- | ------------- | ------------------------------------------------- |
+| In the same group | Same or lower | Waits until the holding task is done              |
+| In the same group | Higher        | Waits until the holding task is done              |
+| Outside the group | Higher        | Interrupts the holding task                       |
+| Outside the group | Same          | Takes turns with the holding task at each `yield` |
+| Outside the group | Lower         | Runs after the holding task is done               |
 
-So group members never take turns with each other, even if a pending member has a higher priority. While the holding task runs in place of a member and waits for a Promise, tasks with a lower priority than that member do not run, except for tasks that this Promise queued.
+So group members never take turns with each other, even if a pending member has a higher priority.
+
+A `Forbidden` or `Restart` task must not spawn a subtask in a group that is held by a task it holds back. Two tasks must also not each spawn a subtask in the group the other one holds. In both cases the subtask would wait forever. The scheduler then does not queue the subtask and throws an error into the parent task at its `yield`.
+
+Likewise, a task that waits for a Promise must not queue a task from that Promise into a group whose holder cannot finish during the wait. This is the case when the holder has a lower priority than the waiting task, when it is the waiting task itself, or when it waits for such a task. The queued task could not run during the wait, so it is rejected and the waiting task fails. Mixing priorities within a concurrency group is best avoided altogether.
 
 To use concurrency groups, specify the `group` property in the task builder:
 
