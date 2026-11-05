@@ -66,8 +66,8 @@ function getTaskName(task: Task<unknown>): string {
 			tag = task.tag.id;
 		}
 	}
-	if (task.name == undefined) return `${tag ?? "unnamed"} (ID ${task.id})`;
-	return `${task.name} (ID ${task.id}${tag ? `, tag ${tag}` : ""})`;
+	const name = [task.name, tag].filter((s) => s != undefined).join(" ");
+	return `${name || "unnamed"} (ID ${task.id})`;
 }
 
 /** Defines the necessary information for creating a task */
