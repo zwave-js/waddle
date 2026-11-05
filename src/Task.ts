@@ -57,16 +57,17 @@ export interface Task<
 }
 
 function getTaskName(task: Task<unknown>): string {
-	let name = task.name;
-	if (name == undefined && task.tag) {
+	let tag: string | undefined;
+	if (task.tag) {
 		// The tag may contain values JSON cannot serialize, like a BigInt
 		try {
-			name = JSON.stringify(task.tag);
+			tag = JSON.stringify(task.tag);
 		} catch {
-			name = task.tag.id;
+			tag = task.tag.id;
 		}
 	}
-	return `${name ?? "unnamed"} (ID ${task.id})`;
+	if (task.name == undefined) return `${tag ?? "unnamed"} (ID ${task.id})`;
+	return `${task.name} (ID ${task.id}${tag ? `, tag ${tag}` : ""})`;
 }
 
 /** Defines the necessary information for creating a task */
@@ -93,9 +94,9 @@ export interface TaskBuilder<
 	 * - Either a Promise, in which case it must yield a function that returns that Promise
 	 * - Or another task, in which case it must yield a TaskBuilder object or a function that returns one
 	 *
-	 * Yielded Promises should not spawn new tasks. If they do, the spawned tasks MUST have a higher priority than the parent task.
-	 * They also MUST NOT wait for a concurrency group that the parent task or a task with a lower priority holds.
-	 * Such a task could not run during the wait, so `queueTask` throws and the parent task fails.
+	 * Yielded Promises should not spawn new tasks. If they do, the spawned tasks MUST be able to run while this task waits.
+	 * So they need a higher priority than this task, and they must not wait for a concurrency group that this task or a task with a lower priority holds.
+	 * When a spawned task waits for such a group, `queueTask` throws and this task fails.
 	 * A `Forbidden` or `Restart` task MUST NOT yield such a Promise. A `Forbidden` task keeps the spawned task from running,
 	 * and a `Restart` task is restarted every time the spawned task runs.
 	 *
@@ -133,7 +134,7 @@ function isSameOrParentOf<TaskTag extends { id: string }>(
 	return false;
 }
 
-/** Returns whether one of the tasks is the other one or waits for it, directly or through other tasks */
+/** Returns whether the tasks are identical or one waits for the other, either directly or through other tasks */
 function inSameChain<TaskTag extends { id: string }>(
 	a: Task<unknown, TaskTag>,
 	b: Task<unknown, TaskTag>,
