@@ -1,4 +1,4 @@
-# ![Waddle](docs/logo.jpg)
+# ![Waddle](docs/logo.svg)
 
 ## A cooperative task scheduler
 
