@@ -4406,3 +4406,148 @@ for (const interrupt of [
 		await scheduler.stop();
 	});
 }
+
+test("A task that bypasses interrupt behavior does not run while a held-back task with a higher priority waits", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "group" };
+
+	// Task 1 has a normal priority, holds the group and waits
+	const gate1 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		bypassInterruptBehavior: true,
+		group,
+		task: async function* () {
+			order.push("1a");
+			yield () => gate1;
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	// Task 2 has a high priority and waits
+	const gate2 = createDeferredPromise<void>();
+	const task2 = scheduler.queueTask({
+		priority: TaskPriority.High,
+		task: async function* () {
+			order.push("2a");
+			yield () => gate2;
+			order.push("2b");
+		},
+	});
+	await wait(1);
+
+	// Task 3 may not be interrupted, holds back task 2 and spawns subtask 4 in the group of task 1
+	const task3 = scheduler.queueTask({
+		priority: TaskPriority.High,
+		interrupt: TaskInterruptBehavior.Forbidden,
+		task: async function* () {
+			order.push("3a");
+			yield {
+				priority: TaskPriority.High,
+				group,
+				task: async function* () {
+					order.push("4a");
+				},
+			};
+			order.push("3b");
+		},
+	});
+	await wait(1);
+
+	// Task 1 must not continue while task 2 waits, even though task 3 holds task 2 back
+	gate1.resolve();
+	await wait(10);
+	t.expect(order).toStrictEqual(["1a", "2a", "3a"]);
+
+	gate2.resolve();
+	await Promise.all([task1, task2, task3]);
+	t.expect(order).toStrictEqual(["1a", "2a", "3a", "1b", "4a", "3b", "2b"]);
+
+	await scheduler.stop();
+});
+
+test("A Restart task that bypasses interrupt behavior is restarted by a task with a higher priority", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+
+	const gates = [
+		createDeferredPromise<void>(),
+		createDeferredPromise<void>(),
+	];
+	let starts = 0;
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		bypassInterruptBehavior: true,
+		task: async function* () {
+			const run = ++starts;
+			order.push(`1a${run}`);
+			yield () => gates[run - 1];
+			order.push(`1b${run}`);
+		},
+	});
+	await wait(1);
+
+	await scheduler.queueTask({
+		priority: TaskPriority.High,
+		task: async function* () {
+			order.push("2a");
+		},
+	});
+	await wait(1);
+	t.expect(order).toStrictEqual(["1a1", "2a", "1a2"]);
+
+	gates[1].resolve();
+	await task1;
+	t.expect(order).toStrictEqual(["1a1", "2a", "1a2", "1b2"]);
+
+	await scheduler.stop();
+});
+
+test("A task with a higher priority restarts both a waiting Restart task and a Restart task that bypassed its hold", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const starts = [0, 0];
+	const gates = [
+		createDeferredPromise<void>(),
+		createDeferredPromise<void>(),
+	];
+	const createTask = (n: number, bypassInterruptBehavior: boolean) =>
+		scheduler.queueTask({
+			priority: TaskPriority.Normal,
+			interrupt: TaskInterruptBehavior.Restart,
+			bypassInterruptBehavior,
+			task: async function* () {
+				// Each task waits for its gate only after its first start
+				if (++starts[n - 1] === 1) yield () => new Promise(() => {});
+				yield () => gates[n - 1];
+			},
+		});
+
+	// Task 2 runs while task 1 waits, because it bypasses the hold of task 1
+	const task1 = createTask(1, false);
+	await wait(1);
+	const task2 = createTask(2, true);
+	await wait(1);
+	t.expect(starts).toStrictEqual([1, 1]);
+
+	await scheduler.queueTask({
+		priority: TaskPriority.High,
+		task: async function* () {},
+	});
+	await wait(10);
+	t.expect(starts).toStrictEqual([2, 2]);
+
+	gates[0].resolve();
+	gates[1].resolve();
+	await Promise.all([task1, task2]);
+
+	await scheduler.stop();
+});

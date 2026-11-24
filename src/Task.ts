@@ -93,6 +93,7 @@ export interface TaskBuilder<
 	 *
 	 * The task can then run while such a task waits for a Promise or a subtask, or between two of its steps.
 	 * Running it does not restart a `Restart` task. Subtasks of this task do the same.
+	 * Its own `interrupt` behavior still applies.
 	 * The task still waits for its concurrency group. It also still does not run while a task with a higher priority waits for a Promise.
 	 *
 	 * Use this for a task that a `Forbidden` or `Restart` task needs before it can continue.
@@ -607,24 +608,25 @@ export class TaskScheduler<
 		return visit(task);
 	}
 
-	/** Returns the queued task that may take the next step, other than `skip` */
+	/** Returns the queued task that may take the next step, other than the ones in `skip` */
 	private pickNextTask(
-		skip?: Task<unknown, TaskTag>,
+		skip?: ReadonlySet<Task<unknown, TaskTag>>,
 	): Task<unknown, TaskTag> | undefined {
 		let floorPriority: TaskPriority | undefined;
 		for (const task of this._tasks) {
-			if (task === skip) continue;
+			if (skip?.has(task)) continue;
 			// While a task waits for a promise, tasks with a lower priority may not run.
+			// This also applies while the waiting task is held back.
 			// The queue is sorted by priority, so no later task may run either.
 			if (floorPriority != undefined && task.priority > floorPriority) {
 				return;
 			}
-			if (this.isHeldBack(task)) continue;
-			if (this.findGroupHolder(task)) continue;
 			if (this._awaitedPromises.has(task)) {
 				floorPriority ??= task.priority;
 				continue;
 			}
+			if (this.isHeldBack(task)) continue;
+			if (this.findGroupHolder(task)) continue;
 			return task;
 		}
 	}
@@ -848,27 +850,34 @@ export class TaskScheduler<
 			const task = this.pickNextTask();
 			if (task) {
 				// A task with a higher priority interrupts the current task, also while it waits.
-				// A task that bypasses interrupt behavior does not interrupt it and does not become the current task here.
-				const interrupted = this._interruptibleTask;
-				if (
-					interrupted &&
-					interrupted !== task &&
-					interrupted.interrupt === TaskInterruptBehavior.Restart &&
-					task.priority < interrupted.priority &&
-					!task.bypassInterruptBehavior
-				) {
-					// The interrupted task needs to be restarted, so reset it
-					this.releaseHolds(interrupted);
-					await interrupted.reset();
-					// Re-evaluate the queue if it changed during the reset.
-					// The reset task must be skipped, because it no longer waits and could be picked again.
-					const repicked = this.pickNextTask(interrupted);
-					if (
-						this._interruptibleTask !== interrupted ||
-						repicked !== task
-					) {
-						continue;
+				// When the current task bypasses interrupt behavior, it also interrupts the task that ran before it.
+				// A task that bypasses interrupt behavior interrupts neither.
+				const interrupted = new Set(
+					[this._currentTask, this._interruptibleTask].filter(
+						(t): t is Task<unknown, TaskTag> =>
+							!!t &&
+							t !== task &&
+							t.interrupt === TaskInterruptBehavior.Restart &&
+							t.state !== TaskState.None &&
+							task.priority < t.priority &&
+							!task.bypassInterruptBehavior,
+					),
+				);
+				if (interrupted.size > 0) {
+					// The interrupted tasks need to be restarted, so reset them
+					for (const t of interrupted) {
+						this.releaseHolds(t);
+						await t.reset();
 					}
+					// Re-evaluate the queue if it changed during the reset.
+					// The reset tasks must be skipped, because they no longer wait and could be picked again.
+					const repicked = this.pickNextTask(interrupted);
+					const removed = [...interrupted].some(
+						(t) =>
+							this._currentTask !== t &&
+							this._interruptibleTask !== t,
+					);
+					if (removed || repicked !== task) continue;
 				}
 				this._currentTask = task;
 				if (!task.bypassInterruptBehavior) {
