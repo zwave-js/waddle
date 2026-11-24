@@ -4786,3 +4786,154 @@ test("Removing the interrupting task during the cleanup of a restarted task leav
 
 	await scheduler.stop();
 });
+
+test("A task that bypasses interrupt behavior is rejected when it is in the concurrency group of a started Forbidden task", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "controller-exclusive" };
+
+	const commandDone = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		name: "task 1",
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Forbidden,
+		group,
+		task: async function* () {
+			order.push("1a");
+			yield () => commandDone;
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	const task2 = scheduler.queueTask({
+		name: "task 2",
+		priority: TaskPriority.Highest,
+		bypassInterruptBehavior: true,
+		group,
+		task: async function* () {
+			order.push("2a");
+		},
+	});
+	await t
+		.expect(() => task2)
+		.rejects.toThrowError(
+			/^Cannot queue task 2 \(ID \d+\)\. task 1 \(ID \d+\) must finish before task 2 \(ID \d+\) can run, because both are in concurrency group "controller-exclusive"\. task 2 \(ID \d+\) bypasses the interrupt behavior of task 1 \(ID \d+\), so task 1 \(ID \d+\) may wait for it\.$/,
+		);
+	t.expect(scheduler.findTask((t) => t.name === "task 2")).toBeUndefined();
+
+	// Task 1 is not affected
+	commandDone.resolve();
+	await task1;
+	t.expect(order).toStrictEqual(["1a", "1b"]);
+
+	await scheduler.stop();
+});
+
+test("A task that bypasses interrupt behavior is rejected when its group holder waits for a started Forbidden task", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const group: TaskConcurrencyGroup = { id: "group" };
+
+	// Task 1 holds the group and waits
+	const gate1 = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		name: "task 1",
+		priority: TaskPriority.Normal,
+		group,
+		task: async function* () {
+			yield () => gate1;
+		},
+	});
+	await wait(1);
+
+	// Task 2 may not be interrupted and holds task 1 back
+	const gate2 = createDeferredPromise<void>();
+	const task2 = scheduler.queueTask({
+		name: "task 2",
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Forbidden,
+		task: async function* () {
+			yield () => gate2;
+		},
+	});
+	await wait(1);
+
+	// Task 3 would wait for task 1, which waits for task 2
+	const task3 = scheduler.queueTask({
+		name: "task 3",
+		priority: TaskPriority.Highest,
+		bypassInterruptBehavior: true,
+		group,
+		task: async function* () {},
+	});
+	await t
+		.expect(() => task3)
+		.rejects.toThrowError(
+			/^Cannot queue task 3 \(ID \d+\)\. task 1 \(ID \d+\) must finish before task 3 \(ID \d+\) can run, because both are in concurrency group "group"\. task 2 \(ID \d+\) must finish before task 1 \(ID \d+\) can run, because it must not be interrupted\. task 3 \(ID \d+\) bypasses the interrupt behavior of task 2 \(ID \d+\), so task 2 \(ID \d+\) may wait for it\.$/,
+		);
+
+	gate1.resolve();
+	gate2.resolve();
+	await Promise.all([task1, task2]);
+
+	await scheduler.stop();
+});
+
+test("A subtask of a task that bypasses interrupt behavior is rejected at its parent's yield when it is in the concurrency group of a started Forbidden task", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "controller-exclusive" };
+
+	const commandDone = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		name: "task 1",
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Forbidden,
+		group,
+		task: async function* () {
+			order.push("1a");
+			yield () => commandDone;
+			order.push("1b");
+		},
+	});
+	await wait(1);
+
+	// Task 2 has no group, but its subtask 3 is in the group of task 1
+	let error: unknown;
+	const task2 = scheduler.queueTask({
+		name: "task 2",
+		priority: TaskPriority.Highest,
+		bypassInterruptBehavior: true,
+		task: async function* () {
+			order.push("2a");
+			try {
+				yield {
+					name: "task 3",
+					priority: TaskPriority.Highest,
+					group,
+					task: async function* () {
+						order.push("3a");
+					},
+				};
+			} catch (e) {
+				error = e;
+			}
+			order.push("2b");
+			commandDone.resolve();
+		},
+	});
+
+	await Promise.all([task1, task2]);
+	t.expect(order).toStrictEqual(["1a", "2a", "2b", "1b"]);
+	t.expect((error as Error).message).toMatch(
+		/^Subtask task 3 \(ID \d+\) would wait forever\. task 1 \(ID \d+\) must finish before task 3 \(ID \d+\) can run, because both are in concurrency group "controller-exclusive"\. task 3 \(ID \d+\) bypasses the interrupt behavior of task 1 \(ID \d+\), so task 1 \(ID \d+\) may wait for it\.$/,
+	);
+
+	await scheduler.stop();
+});

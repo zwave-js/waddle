@@ -95,6 +95,8 @@ export interface TaskBuilder<
 	 * Running it does not restart a `Restart` task. Subtasks of this task do the same.
 	 * Its own `interrupt` behavior still applies.
 	 * The task still waits for its concurrency group. It also still does not run while a task with a higher priority waits for a Promise.
+	 * When the task would wait for a started `Forbidden` or `Restart` task, for example because that task holds its group,
+	 * the scheduler rejects it without queueing it. A subtask of this task is rejected the same way, and the error is thrown at its parent's `yield`.
 	 *
 	 * Use this for a task that a `Forbidden` or `Restart` task needs before it can continue.
 	 * Example: A recovery task that settles the Promise the `Forbidden` task waits for.
@@ -344,6 +346,18 @@ export class TaskScheduler<
 
 	public queueTask<T>(builder: TaskBuilder<T, TaskTag>): Promise<T> {
 		const task = this.createTask(builder);
+		const reasons = this.findWaitForBypassedHolder(task);
+		if (reasons) {
+			// Reject the task without queueing it
+			const error = new Error(
+				`Cannot queue ${getTaskName(task)}. ${reasons.join(". ")}.`,
+			);
+			if (this.verbose) {
+				console.error(error.message);
+			}
+			task.reject(error as TError);
+			return task.promise;
+		}
 		this._spawnedTasks?.push(task);
 		this.assignNextTurn(task);
 		this._tasks.add(task);
@@ -583,6 +597,23 @@ export class TaskScheduler<
 		return this.findWaitFor(subtask, (blocker) => {
 			if (!isSameOrParentOf(blocker, parent)) return;
 			return `${getTaskName(parent)} waits for ${getTaskName(subtask)}`;
+		});
+	}
+
+	/**
+	 * Returns the reasons why `task` would wait for a started `Forbidden` or `Restart` task, if `task` bypasses interrupt behavior.
+	 * A task bypasses interrupt behavior so it can run before such a task is done. That task is assumed to wait for it.
+	 *
+	 * Example: Forbidden task F waits for a promise. Task M bypasses interrupt behavior and is in the concurrency group of F.
+	 * Then M waits for F, and F waits for M.
+	 */
+	private findWaitForBypassedHolder(
+		task: Task<unknown, TaskTag>,
+	): string[] | undefined {
+		if (!task.bypassInterruptBehavior) return;
+		return this.findWaitFor(task, (blocker) => {
+			if (!this._holders.has(blocker)) return;
+			return `${getTaskName(task)} bypasses the interrupt behavior of ${getTaskName(blocker)}, so ${getTaskName(blocker)} may wait for it`;
 		});
 	}
 
@@ -935,7 +966,9 @@ export class TaskScheduler<
 						console.log(`- Task spawned a sub-task`);
 					}
 					const subtask = stepResult.task;
-					const deadlock = this.findDeadlock(subtask);
+					const deadlock =
+						this.findDeadlock(subtask) ??
+						this.findWaitForBypassedHolder(subtask);
 					if (deadlock) {
 						// Reject the subtask without queueing it.
 						// The task receives the error at its yield once it steps again.
