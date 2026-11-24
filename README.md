@@ -188,7 +188,7 @@ A task is interrupted when a task with a higher priority runs before it is done.
 
 So towards tasks with the same priority, a started `Restart` task behaves like a `Forbidden` task.
 
-Sometimes a `Forbidden` or `Restart` task needs another task to run before it can continue. Example: The task waits for a Promise that only settles after a recovery task ran. When the recovery task is not a subtask of the waiting task, the waiting task holds it back and both wait forever. To let it run, set `bypassInterruptBehavior` in its builder:
+Sometimes a `Forbidden` or `Restart` task waits for something that only another task can do, like a recovery task. Unless that task is a subtask, it is held back and both wait forever. To let it run, set `bypassInterruptBehavior` in its builder:
 
 ```ts
 scheduler.queueTask({
@@ -200,15 +200,7 @@ scheduler.queueTask({
 });
 ```
 
-Started `Forbidden` and `Restart` tasks do not hold such a task back. These rules apply to it:
-
-- It runs while a `Forbidden` or `Restart` task waits for a Promise or a subtask. It also runs between two steps of such a task. A step itself is never interrupted.
-- It does not restart a `Restart` task. The next task without the option that has a higher priority still restarts it.
-- When it is a `Restart` task itself, a task with a higher priority still restarts it.
-- Priorities still apply. While a task with a higher priority waits for a Promise, it does not run. A waiting task that is held back itself does not count, like for any other task.
-- A `Forbidden` or `Restart` task may yield a Promise that queues such a task, if it has at least the priority of the waiting task. Otherwise the waiting task fails with an error.
-- It still waits for its concurrency group. When it would wait for a started `Forbidden` or `Restart` task, for example because that task holds its group, the scheduler does not queue it and rejects it with an error. The scheduler assumes that the `Forbidden` or `Restart` task waits for it, so both would wait forever. A subtask of such a task is rejected the same way, and its parent receives the error at its `yield`.
-- Its subtasks bypass the interrupt behavior of other tasks too.
+Such a task and its subtasks run while a `Forbidden` or `Restart` task waits, and between its steps. They never restart a `Restart` task. Priorities, their own interrupt behavior and concurrency groups still apply as usual. If such a task would have to wait for the `Forbidden` or `Restart` task, for example because both are in the same concurrency group, the scheduler rejects it with an error.
 
 #### Waiting while yielding
 
