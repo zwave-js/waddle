@@ -188,6 +188,26 @@ A task is interrupted when a task with a higher priority runs before it is done.
 
 So towards tasks with the same priority, a started `Restart` task behaves like a `Forbidden` task.
 
+Sometimes a `Forbidden` or `Restart` task needs another task to run before it can continue. Example: The task waits for a Promise that only settles after a recovery task ran. When the recovery task is not a subtask of the waiting task, the waiting task holds it back and both wait forever. To let it run, set `bypassInterruptBehavior` in its builder:
+
+```ts
+scheduler.queueTask({
+	priority: TaskPriority.Highest,
+	bypassInterruptBehavior: true,
+	task: async function* () {
+		// Recover, then settle the Promise the Forbidden task waits for
+	},
+});
+```
+
+Started `Forbidden` and `Restart` tasks do not hold such a task back. These rules apply to it:
+
+- It runs while a `Forbidden` or `Restart` task waits for a Promise or a subtask. It also runs between two steps of such a task. A step itself is never interrupted.
+- It does not restart a `Restart` task. The next task without the option that has a higher priority still restarts it.
+- Priorities still apply. While a task with a higher priority waits for a Promise, it does not run.
+- It still waits for its concurrency group. It must not be in the group of the `Forbidden` or `Restart` task it should run past.
+- Its subtasks bypass the interrupt behavior of other tasks too.
+
 #### Waiting while yielding
 
 The previous examples showed how to yield to the scheduler, which is fine for most cases.
