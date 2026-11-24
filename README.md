@@ -205,7 +205,8 @@ Started `Forbidden` and `Restart` tasks do not hold such a task back. These rule
 - It runs while a `Forbidden` or `Restart` task waits for a Promise or a subtask. It also runs between two steps of such a task. A step itself is never interrupted.
 - It does not restart a `Restart` task. The next task without the option that has a higher priority still restarts it.
 - When it is a `Restart` task itself, a task with a higher priority still restarts it.
-- Priorities still apply. While a task with a higher priority waits for a Promise, it does not run. This also applies while the waiting task is held back.
+- Priorities still apply. While a task with a higher priority waits for a Promise, it does not run. A waiting task that is held back itself does not count, like for any other task.
+- A `Forbidden` or `Restart` task may yield a Promise that queues such a task, if it has at least the priority of the waiting task. Otherwise the waiting task fails with an error.
 - It still waits for its concurrency group. It must not be in the group of the `Forbidden` or `Restart` task it should run past.
 - Its subtasks bypass the interrupt behavior of other tasks too.
 

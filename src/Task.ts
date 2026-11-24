@@ -114,6 +114,7 @@ export interface TaskBuilder<
 	 * When a spawned task waits for a task that cannot run during the wait, the spawned task is rejected and this task fails.
 	 * This check only sees tasks that the factory queues before it returns. Tasks queued after an `await` in the factory are not checked.
 	 * A `Forbidden` or `Restart` task MUST NOT yield such a Promise, unless the spawned tasks set `bypassInterruptBehavior`.
+	 * A spawned task that sets it and has a lower priority than this task is rejected, and this task fails.
 	 * Otherwise a `Forbidden` task keeps the spawned task from running, and a `Restart` task is restarted every time the spawned task runs.
 	 *
 	 * Yielding a TaskBuilder throws an error at the `yield` when the subtask would wait forever.
@@ -284,10 +285,11 @@ export class TaskScheduler<
 	);
 	private _currentTask: Task<unknown, TaskTag> | undefined;
 	/**
-	 * The task that a task with a higher priority interrupts when it runs next.
-	 * It follows `_currentTask`, but tasks that bypass interrupt behavior do not replace it.
+	 * The tasks that a task with a higher priority interrupts when it runs next.
+	 * These are the tasks that took a step since the last step of a task that does not bypass interrupt behavior.
+	 * A task leaves the set when it is done, removed, reset, or waits for a subtask.
 	 */
-	private _interruptibleTask: Task<unknown, TaskTag> | undefined;
+	private _interruptibleTasks = new Set<Task<unknown, TaskTag>>();
 	/** The promises that queued tasks wait for, until they settle */
 	private _awaitedPromises = new Map<
 		Task<unknown, TaskTag>,
@@ -431,10 +433,8 @@ export class TaskScheduler<
 		if (this._currentTask === leaf) {
 			this._currentTask = undefined;
 		}
-		if (this._interruptibleTask === leaf) {
-			this._interruptibleTask = undefined;
-		}
 		for (let task = leaf; ; task = task.parent!) {
+			this._interruptibleTasks.delete(task);
 			this.releaseHolds(task);
 			if (task === outermost) break;
 		}
@@ -524,6 +524,12 @@ export class TaskScheduler<
 		task: Task<unknown, TaskTag>,
 		spawner: Task<unknown, TaskTag>,
 	): Error | undefined {
+		// A bypassing task is not held back by `spawner`, so its own priority must be checked
+		if (task.bypassInterruptBehavior && task.priority > spawner.priority) {
+			return new Error(
+				`Cannot queue ${getTaskName(task)} while ${getTaskName(spawner)} waits for a promise. ${getTaskName(task)} has a lower priority than ${getTaskName(spawner)}, so it does not run before ${getTaskName(spawner)} continues.`,
+			);
+		}
 		const reasons = this.findWaitFor(task, (blocker) => {
 			if (
 				blocker.priority <= spawner.priority &&
@@ -616,17 +622,16 @@ export class TaskScheduler<
 		for (const task of this._tasks) {
 			if (skip?.has(task)) continue;
 			// While a task waits for a promise, tasks with a lower priority may not run.
-			// This also applies while the waiting task is held back.
 			// The queue is sorted by priority, so no later task may run either.
 			if (floorPriority != undefined && task.priority > floorPriority) {
 				return;
 			}
+			if (this.isHeldBack(task)) continue;
+			if (this.findGroupHolder(task)) continue;
 			if (this._awaitedPromises.has(task)) {
 				floorPriority ??= task.priority;
 				continue;
 			}
-			if (this.isHeldBack(task)) continue;
-			if (this.findGroupHolder(task)) continue;
 			return task;
 		}
 	}
@@ -849,40 +854,32 @@ export class TaskScheduler<
 		while (true) {
 			const task = this.pickNextTask();
 			if (task) {
-				// A task with a higher priority interrupts the current task, also while it waits.
-				// When the current task bypasses interrupt behavior, it also interrupts the task that ran before it.
-				// A task that bypasses interrupt behavior interrupts neither.
-				const interrupted = new Set(
-					[this._currentTask, this._interruptibleTask].filter(
-						(t): t is Task<unknown, TaskTag> =>
-							!!t &&
-							t !== task &&
-							t.interrupt === TaskInterruptBehavior.Restart &&
-							t.state !== TaskState.None &&
-							task.priority < t.priority &&
-							!task.bypassInterruptBehavior,
-					),
-				);
-				if (interrupted.size > 0) {
-					// The interrupted tasks need to be restarted, so reset them
-					for (const t of interrupted) {
-						this.releaseHolds(t);
-						await t.reset();
-					}
-					// Re-evaluate the queue if it changed during the reset.
-					// The reset tasks must be skipped, because they no longer wait and could be picked again.
-					const repicked = this.pickNextTask(interrupted);
-					const removed = [...interrupted].some(
-						(t) =>
-							this._currentTask !== t &&
-							this._interruptibleTask !== t,
+				// A task with a higher priority interrupts the tasks that ran since the last task that does not bypass interrupt behavior.
+				// A task that bypasses interrupt behavior interrupts none of them.
+				if (!task.bypassInterruptBehavior) {
+					const interrupted = new Set(
+						[...this._interruptibleTasks].filter(
+							(t) =>
+								t !== task &&
+								t.interrupt === TaskInterruptBehavior.Restart &&
+								task.priority < t.priority,
+						),
 					);
-					if (removed || repicked !== task) continue;
+					if (interrupted.size > 0) {
+						// The interrupted tasks need to be restarted, so reset them
+						for (const t of interrupted) {
+							this._interruptibleTasks.delete(t);
+							this.releaseHolds(t);
+							await t.reset();
+						}
+						// Re-evaluate the queue if it changed during the reset.
+						// The reset tasks must be skipped, because they no longer wait and could be picked again.
+						if (this.pickNextTask(interrupted) !== task) continue;
+					}
+					this._interruptibleTasks.clear();
 				}
 				this._currentTask = task;
-				if (!task.bypassInterruptBehavior) {
-					this._interruptibleTask = task;
-				}
+				this._interruptibleTasks.add(task);
 
 				if (this.verbose) {
 					console.log(`Stepping through task: ${getTaskName(task)}`);
@@ -898,9 +895,7 @@ export class TaskScheduler<
 					this.releaseHolds(task);
 					// Claim the task before awaiting, so a concurrent removeTasks() skips it
 					this._currentTask = undefined;
-					if (this._interruptibleTask === task) {
-						this._interruptibleTask = undefined;
-					}
+					this._interruptibleTasks.delete(task);
 					if (task.parent) this.restoreParentTask(task.parent);
 					await task.reset();
 				};
@@ -964,9 +959,7 @@ export class TaskScheduler<
 					this._tasks.add(subtask);
 					// Switching to the subtask must not count as interrupting the parent
 					this._currentTask = undefined;
-					if (this._interruptibleTask === task) {
-						this._interruptibleTask = undefined;
-					}
+					this._interruptibleTasks.delete(task);
 				} else {
 					if (stepResult.newState === TaskState.AwaitingPromise) {
 						// The task is waiting for something
