@@ -4632,3 +4632,157 @@ test("A Restart task that bypasses interrupt behavior is restarted by a task wit
 
 	await scheduler.stop();
 });
+
+test("A waiting Restart task is restarted by a task with a higher priority after a task with a lower priority ran", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const order: string[] = [];
+	const group: TaskConcurrencyGroup = { id: "group" };
+	const starts = { 2: 0, 3: 0 };
+
+	// Task 1 has a low priority, holds the group and waits twice
+	const gate1a = createDeferredPromise<void>();
+	const gate1b = createDeferredPromise<void>();
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Low,
+		group,
+		task: async function* () {
+			order.push("1a");
+			yield () => gate1a;
+			order.push("1b");
+			yield () => gate1b;
+			order.push("1c");
+		},
+	});
+	await wait(1);
+
+	// Task 2 must be restarted after an interruption and waits
+	const gates2 = [
+		createDeferredPromise<void>(),
+		createDeferredPromise<void>(),
+	];
+	const task2 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* () {
+			const run = ++starts[2];
+			order.push(`2a${run}`);
+			yield () => gates2[run - 1];
+			order.push(`2b${run}`);
+		},
+	});
+	await wait(1);
+
+	// Task 3 bypasses the hold of task 2, holds task 2 back and waits for subtask 4 in the group of task 1
+	const task3 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		bypassInterruptBehavior: true,
+		task: async function* () {
+			order.push(`3a${++starts[3]}`);
+			yield {
+				priority: TaskPriority.Normal,
+				group,
+				task: async function* () {
+					order.push("4a");
+				},
+			};
+			order.push("3b");
+		},
+	});
+	await wait(1);
+
+	// Task 1 takes a step, because task 2 is held back
+	gate1a.resolve();
+	await wait(10);
+	t.expect(order).toStrictEqual(["1a", "2a1", "3a1", "1b"]);
+
+	// Task 5 restarts task 2. Task 3 waits for its subtask, so it is not restarted.
+	await scheduler.queueTask({
+		priority: TaskPriority.High,
+		task: async function* () {
+			order.push("5a");
+		},
+	});
+	gate1b.resolve();
+	gates2[1].resolve();
+	await Promise.all([task1, task2, task3]);
+	t.expect(starts).toStrictEqual({ 2: 2, 3: 1 });
+	t.expect(order).toStrictEqual([
+		"1a",
+		"2a1",
+		"3a1",
+		"1b",
+		"5a",
+		"1c",
+		"4a",
+		"3b",
+		"2a2",
+		"2b2",
+	]);
+
+	await scheduler.stop();
+});
+
+test("Removing the interrupting task during the cleanup of a restarted task leaves other Restart tasks alone", async (t) => {
+	const scheduler = new TaskScheduler();
+	scheduler.start();
+
+	const starts = [0, 0];
+	const gates = [
+		createDeferredPromise<void>(),
+		createDeferredPromise<void>(),
+	];
+	let removed: Promise<boolean> | undefined;
+
+	// Task 1 removes task 3 during its first cleanup
+	const task1 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		task: async function* () {
+			if (++starts[0] === 1) yield () => new Promise(() => {});
+			yield () => gates[0];
+		},
+		cleanup: async () => {
+			removed ??= scheduler.removeTasks((t) => t.name === "task 3");
+			await removed;
+		},
+	});
+	await wait(1);
+
+	// Task 2 bypasses the hold of task 1 and waits
+	const task2 = scheduler.queueTask({
+		priority: TaskPriority.Normal,
+		interrupt: TaskInterruptBehavior.Restart,
+		bypassInterruptBehavior: true,
+		task: async function* () {
+			++starts[1];
+			yield () => gates[1];
+		},
+	});
+	await wait(1);
+	t.expect(starts).toStrictEqual([1, 1]);
+
+	const task3 = scheduler.queueTask({
+		name: "task 3",
+		priority: TaskPriority.High,
+		task: async function* () {},
+	});
+	await t.expect(() => task3).rejects.toThrowError("Task was removed");
+	t.expect(await removed!).toBe(true);
+	await wait(10);
+
+	// Task 1 was reset before task 3 was removed, so it was no longer waiting.
+	// Task 2 was not reset. Task 2 holds task 1 back until it is done, then task 1 starts over.
+	t.expect(starts).toStrictEqual([1, 1]);
+	gates[1].resolve();
+	await task2;
+	await wait(10);
+	t.expect(starts).toStrictEqual([2, 1]);
+
+	gates[0].resolve();
+	await task1;
+
+	await scheduler.stop();
+});

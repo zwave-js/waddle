@@ -285,11 +285,11 @@ export class TaskScheduler<
 	);
 	private _currentTask: Task<unknown, TaskTag> | undefined;
 	/**
-	 * The tasks that a task with a higher priority interrupts when it runs next.
-	 * These are the tasks that took a step since the last step of a task that does not bypass interrupt behavior.
-	 * A task leaves the set when it is done, removed, reset, or waits for a subtask.
+	 * The started `Restart` tasks that the next picked task with a higher priority restarts.
+	 * A task enters the set when it is picked for a step.
+	 * It leaves the set when it is done, removed, reset, or waits for a subtask. Steps of other tasks do not change the set.
 	 */
-	private _interruptibleTasks = new Set<Task<unknown, TaskTag>>();
+	private _restartableTasks = new Set<Task<unknown, TaskTag>>();
 	/** The promises that queued tasks wait for, until they settle */
 	private _awaitedPromises = new Map<
 		Task<unknown, TaskTag>,
@@ -434,7 +434,7 @@ export class TaskScheduler<
 			this._currentTask = undefined;
 		}
 		for (let task = leaf; ; task = task.parent!) {
-			this._interruptibleTasks.delete(task);
+			this._restartableTasks.delete(task);
 			this.releaseHolds(task);
 			if (task === outermost) break;
 		}
@@ -854,32 +854,29 @@ export class TaskScheduler<
 		while (true) {
 			const task = this.pickNextTask();
 			if (task) {
-				// A task with a higher priority interrupts the tasks that ran since the last task that does not bypass interrupt behavior.
-				// A task that bypasses interrupt behavior interrupts none of them.
-				if (!task.bypassInterruptBehavior) {
-					const interrupted = new Set(
-						[...this._interruptibleTasks].filter(
-							(t) =>
-								t !== task &&
-								t.interrupt === TaskInterruptBehavior.Restart &&
-								task.priority < t.priority,
-						),
-					);
-					if (interrupted.size > 0) {
-						// The interrupted tasks need to be restarted, so reset them
-						for (const t of interrupted) {
-							this._interruptibleTasks.delete(t);
-							this.releaseHolds(t);
-							await t.reset();
-						}
-						// Re-evaluate the queue if it changed during the reset.
-						// The reset tasks must be skipped, because they no longer wait and could be picked again.
-						if (this.pickNextTask(interrupted) !== task) continue;
+				// A task with a higher priority restarts the restartable tasks. A task that bypasses interrupt behavior restarts none.
+				// Reset one task at a time, and re-evaluate the queue after each reset, because the reset can change it.
+				// The reset tasks must be skipped, because they no longer wait and could be picked again.
+				const reset = new Set<Task<unknown, TaskTag>>();
+				let repick = false;
+				for (const t of task.bypassInterruptBehavior
+					? []
+					: this._restartableTasks) {
+					if (t === task || task.priority >= t.priority) continue;
+					this._restartableTasks.delete(t);
+					this.releaseHolds(t);
+					await t.reset();
+					reset.add(t);
+					if (this.pickNextTask(reset) !== task) {
+						repick = true;
+						break;
 					}
-					this._interruptibleTasks.clear();
 				}
+				if (repick) continue;
 				this._currentTask = task;
-				this._interruptibleTasks.add(task);
+				if (task.interrupt === TaskInterruptBehavior.Restart) {
+					this._restartableTasks.add(task);
+				}
 
 				if (this.verbose) {
 					console.log(`Stepping through task: ${getTaskName(task)}`);
@@ -895,7 +892,7 @@ export class TaskScheduler<
 					this.releaseHolds(task);
 					// Claim the task before awaiting, so a concurrent removeTasks() skips it
 					this._currentTask = undefined;
-					this._interruptibleTasks.delete(task);
+					this._restartableTasks.delete(task);
 					if (task.parent) this.restoreParentTask(task.parent);
 					await task.reset();
 				};
@@ -959,7 +956,7 @@ export class TaskScheduler<
 					this._tasks.add(subtask);
 					// Switching to the subtask must not count as interrupting the parent
 					this._currentTask = undefined;
-					this._interruptibleTasks.delete(task);
+					this._restartableTasks.delete(task);
 				} else {
 					if (stepResult.newState === TaskState.AwaitingPromise) {
 						// The task is waiting for something
